@@ -48,3 +48,36 @@ OS/
 ├── screen.c / screen.h       # VGA text mode screen driver
 ├── status.md                 # Development status and progress notes
 └── vmm.c / vmm.h             # Virtual Memory Manager (Paging)
+```
+
+
+##🛠️ Prerequisites
+To build and run this OS, you will need a 32-bit x86 cross-compiler toolchain:
+
+GCC (with -m32 target support or i686-elf-gcc)
+
+NASM (Netwide Assembler)
+
+GNU Make
+
+QEMU (qemu-system-i386) for emulator testing
+
+##⚙️ Building & Running
+Compile the Kernel:
+
+```Bash
+make
+Run in QEMU:
+```
+
+```Bash
+qemu-system-i386 -kernel OS.bin
+Clean Build Artifacts:
+```
+
+```Bash
+make clean
+```
+
+📜 License
+This project is licensed under the GNU General Public License v2.0 (GPLv2). You are free to modify, distribute, and build upon this project, provided that all derivative work remains open-source under the same license terms.
