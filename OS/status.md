@@ -1,59 +1,72 @@
 # GabutOS
 
-Proyek **operating system** dari nol yang dibuat pas lagi gabut berat.
+An **operating system** built from scratch out of pure boredom.
 
-Ini bukan Windows, bukan Linux, bukan juga macOS.
-Ini cuma eksperimen low-level gue buat belajar gimana komputer bener-bener jalan dari boot sampe nunjukin tulisan di layar.
+This isn't Windows, it isn't Linux, and it definitely isn't macOS. 
+It's just my low-level experiment to learn how a computer actually boots up, executes code, and prints stuff on the screen.
 
-### Struktur file
-- `assembler.asm` → entry point, multiboot header, stack setup
-- `kernel.c` → orkestrator utama + shell
-- `screen.c/.h` → driver VGA text mode
-- `gdt.c/.h` + `gdt_flush.asm` → Global Descriptor Table
-- `idt.c/.h` + `idt_flush.asm` + `isr.asm` + `isr.c` → Interrupt Descriptor Table, remap PIC, handler exception & IRQ
-- `keyboard.c/.h` → driver keyboard IRQ-driven (bukan polling lagi)
-- `io.h` → helper `inb`/`outb`
-- `linker.ld` → linker script
+---
 
-### Status Saat Ini
-**v0.2.0** — masih berlanjut (kalo ada waktu luang)
+## 📂 File Structure
 
-**Major update:** Physical Memory Manager (bitmap allocator, parsing memory map dari GRUB) + Paging (identity-map 4MB pertama, CR0.PG aktif, page fault handler). Diverifikasi jalan beneran di QEMU: CR0/CR3 diperiksa, PIT tetap nembak normal setelah paging aktif, zero crash.
+* `assembler.asm` → Entry point, multiboot header, stack setup
+* `kernel.c` → Main orchestrator + shell
+* `screen.c/.h` → VGA text mode driver
+* `gdt.c/.h` + `gdt_flush.asm` → Global Descriptor Table
+* `idt.c/.h` + `idt_flush.asm` + `isr.asm` + `interrupts.c` → Interrupt Descriptor Table, PIC remapping, exception & IRQ handlers
+* `keyboard.c/.h` → IRQ-driven keyboard driver (no more polling!)
+* `pit.c/.h` → Programmable Interval Timer (100Hz) & uptime tracker
+* `pmm.c/.h` → Physical Memory Manager (bitmap allocator)
+* `vmm.c/.h` → Virtual Memory Manager (Paging)
+* `io.h` → Low-level `inb`/`outb` helpers
+* `linker.ld` → Linker script
 
-### Struktur file (update)
-- `multiboot.h` — struct info dari GRUB (memory map, dll)
-- `pmm.c/.h` — Physical Memory Manager, bitmap allocator, cap 256MB
-- `vmm.c/.h` — Virtual Memory Manager, setup page directory/table, page fault handler
-- (file-file sebelumnya tetap sama seperti update terakhir)
+---
 
-Sekarang baru bisa:
-- Boot via bootloader (GRUB, Multiboot)
-- GDT terpasang (flat memory model, sudah ada slot ring3 buat usermode nanti)
-- IDT + PIC remap, exception CPU (0-31) dan IRQ (32-47) ke-handle dengan benar
-- Keyboard IRQ-driven — CPU `hlt` waktu idle, nggak busy-loop 100% lagi
-- Print teks ke layar + scroll
-- Shell interaktif: `help`, `clear`, `mem`
+## ⚡ Current Status & Version History
 
-### Cara Ngebuild & Test (buat yang berani)
+- [x] **GDT** (flat memory model + Ring 3 slots) — `v0.1.x`
+- [x] **IDT + PIC remap + exception/IRQ handling** — `v0.1.x`
+- [x] **Keyboard IRQ-driven** — `v0.1.x`
+- [x] **PIT timer (100Hz) + uptime** — `v0.1.3`
+- [x] **Paging** (PMM bitmap + identity-map first 4MB + page fault handler) — `v0.2.0`
+- [x] **Proper Heap** (`kmalloc`/`kfree`, free-list allocator) — `v0.3.0`
+- [ ] **Ring 0 → Ring 3** (usermode + syscall interface) — *Next up*
+- [ ] **Disk driver** (ATA/AHCI) + simple filesystem
+- [ ] **ELF loader** (run external programs)
+- [ ] **Multitasking** (PIT-based context switching)
+
+---
+
+## ⚠️ Documented Technical Debt
+
+*(So I don't forget later)*
+
+- `kfree()` only merges forward, not backward yet (requires a doubly-linked list).
+- `vmm_map_page()` panics if it needs a new page table outside the first 4MB identity-mapped area (temporary mapping not implemented yet).
+- `MAX_SUPPORTED_MEM` in PMM is still capped at 256MB (fine for now, but hardcoded).
+
+---
+
+## 🛠️ Building & Testing (For the brave)
 
 ```bash
 cd OS
 make
-make run   # butuh qemu-system-i386
+make run   # requires qemu-system-i386
 ```
 
-(Butuh nasm, i686-elf-gcc cross-compiler, qemu, dll. Setupnya agak ribet, ini bukan buat pemula)
+> **Note:** You'll need `nasm`, an `i686-elf-gcc` cross-compiler, `qemu`, etc. Setup is a bit tedious—not really meant for beginners.
 
-### Tujuanku
-Roadmap berikutnya, urut prioritas:
-1. ~~Paging / virtual memory~~ ✅ selesai (v0.2.0)
-2. Heap proper (tambah `free()`, ganti bump allocator ke free-list, sekarang udah punya PMM buat basis-nya)
-3. Ring 0 → Ring 3 (usermode + syscall)
-4. Driver disk (ATA/AHCI) + filesystem sederhana
-5. ELF loader — biar bisa jalanin program eksternal beneran
-6. Multitasking (butuh heap + stack per-task yang udah proper dulu)
+---
 
-Kalau lu juga lagi gabut dan suka ngoprek low-level, silakan fork & ikut gabut bareng 😂
+## 🙏 A Little Apology
 
-Made with ❤️ + kopi + insomnia
-by Makluk Gabut
+Sorry about jumping straight to **v0.3.0**! This project is being developed alongside **TIniMind**, so managing the time between the two got a bit messy and chaotic. 
+
+check out the 0.0.1 version on my other repo: https://github.com/Makluk-Gabut/Gabut-Playground
+
+If you're bored out of your mind and love messing around with low-level dev, feel free to fork it and join the club 😂
+
+Made with ❤️ + coffee + insomnia  
+by *Makluk Gabut*
