@@ -49,9 +49,9 @@ OS/
 ├── status.md                 # Development status and progress notes
 └── vmm.c / vmm.h             # Virtual Memory Manager (Paging)
 ```
+---
 
-
-##🛠️ Prerequisites
+## 🛠️ Prerequisites
 To build and run this OS, you will need a 32-bit x86 cross-compiler toolchain:
 
 GCC (with -m32 target support or i686-elf-gcc)
@@ -62,19 +62,19 @@ GNU Make
 
 QEMU (qemu-system-i386) for emulator testing
 
-##⚙️ Building & Running
-Compile the Kernel:
+## ⚙️ Building & Running
 
+### 1. Compile the Kernel:
 ```Bash
 make
-Run in QEMU:
 ```
 
+### 2. Run in QEMU:
 ```Bash
 qemu-system-i386 -kernel OS.bin
-Clean Build Artifacts:
 ```
 
+### 3. Clean Build Artifacts:
 ```Bash
 make clean
 ```
