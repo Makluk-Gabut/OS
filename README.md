@@ -79,5 +79,5 @@ qemu-system-i386 -kernel OS.bin
 make clean
 ```
 
-📜 License
+### 📜 License
 This project is licensed under the GNU General Public License v2.0 (GPLv2). You are free to modify, distribute, and build upon this project, provided that all derivative work remains open-source under the same license terms.
