@@ -1,68 +1,68 @@
 # GabutOS
 
-Proyek **operating system** dari nol yang dibuat pas lagi gabut berat.
+An **operating system** project built from scratch out of pure boredom.
 
-Ini bukan Windows, bukan Linux, bukan juga macOS.
-Ini cuma eksperimen low-level gue buat belajar gimana komputer bener-bener jalan dari boot sampe nunjukin tulisan di layar.
+This isn't Windows, it isn't Linux, and it definitely isn't macOS.
+It's just my low-level experiment to learn how a computer actually boots up, executes code, and prints stuff on the screen.
 
-### Struktur file
+### File Structure
 - `assembler.asm` → entry point, multiboot header, stack setup
-- `kernel.c` → orkestrator utama + shell
-- `screen.c/.h` → driver VGA text mode
+- `kernel.c` → main orchestrator + shell
+- `screen.c/.h` → VGA text mode driver
 - `gdt.c/.h` + `gdt_flush.asm` → Global Descriptor Table
-- `idt.c/.h` + `idt_flush.asm` + `isr.asm` + `isr.c` → Interrupt Descriptor Table, remap PIC, handler exception & IRQ
-- `keyboard.c/.h` → driver keyboard IRQ-driven (bukan polling lagi)
-- `io.h` → helper `inb`/`outb`
+- `idt.c/.h` + `idt_flush.asm` + `isr.asm` + `isr.c` → Interrupt Descriptor Table, PIC remapping, exception & IRQ handlers
+- `keyboard.c/.h` → IRQ-driven keyboard driver (no more polling)
+- `io.h` → low-level `inb`/`outb` helpers
 - `linker.ld` → linker script
 
-### Status Saat Ini
-**v0.3.1** — masih berlanjut (kalo ada waktu luang)
+### Current Status
+**v0.3.1** — still ongoing (whenever I get some free time)
 
-**Update:** Serial port driver (COM1, polling, 38400 8N1). Semua output `print_string`/`print_dec`/`print_hex` sekarang otomatis ke-mirror ke serial juga (lewat `print_char` di `screen.c`) — gak perlu ubah satu pun kode existing. Manfaat langsung: testing/debug sekarang tinggal `qemu ... -serial file:log.txt` lalu `cat log.txt`, gak perlu lagi screendump atau baca physical memory VGA buffer manual kayak update-update sebelumnya.
+**Update:** Serial port driver (COM1, polling, 38400 8N1). All outputs from `print_string`/`print_dec`/`print_hex` are now automatically mirrored to serial as well (via `print_char` in `screen.c`) — without needing to change a single line of existing code. Immediate benefit: testing/debugging is now as simple as `qemu ... -serial file:log.txt` followed by `cat log.txt`, eliminating the need for screendumps or manually reading physical memory VGA buffers like in previous updates.
 
-### Struktur file (update)
-- `serial.h/.c` — driver COM1 (`serial_init`, `serial_putchar`, `serial_write`)
-- (file-file sebelumnya tetap sama seperti update terakhir)
+### File Structure (Update)
+- `serial.h/.c` — COM1 driver (`serial_init`, `serial_putchar`, `serial_write`)
+- *(Previous files remain the same as the last update)*
 
-**Major update:** Heap allocator proper (`kmalloc`/`kfree`, free-list, first-fit + split + merge-forward), otomatis extend lewat PMM+VMM (`vmm_map_page()` baru, bisa bikin page table on-demand). Diverifikasi jalan beneran: baca langsung isi VGA text buffer via QEMU monitor (bukan screenshot), command `alloctest` kekonfirmasi `kfree()` + reuse blok bebas bekerja benar (alamat blok baru persis sama dengan alamat blok yang baru di-`free()`).
+**Major update:** Proper heap allocator (`kmalloc`/`kfree`, free-list, first-fit + split + merge-forward), automatically extending via PMM+VMM (new `vmm_map_page()`, capable of creating page tables on-demand). Verified running smoothly: verified directly by reading the VGA text buffer contents via QEMU monitor (not screenshots), the `alloctest` command confirmed that `kfree()` + free block reuse work correctly (the address of the newly allocated block matches the exact address of the newly freed block).
 
-**Keterbatasan yang disadari & didokumentasikan di kode** (bukan disembunyikan):
-- `kfree()` cuma merge maju (forward), belum merge mundur — butuh doubly-linked list buat itu
-- `vmm_map_page()` PANIC eksplisit kalau butuh page table baru di physical address >4MB (di luar identity-map) — belum ada temporary mapping buat kasus itu, tapi jarang kejadian di tahap sekarang
+**Known limitations documented in code** (not hidden):
+- `kfree()` only merges forward, not backward yet — requires a doubly-linked list for that.
+- `vmm_map_page()` explicitly PANICS if a new page table is needed at a physical address >4MB (outside the identity-map) — temporary mapping for this case is not implemented yet, though it rarely happens at this stage.
 
-### Struktur file (update)
+### File Structure (Update)
 - `heap.h/.c` — kmalloc/kfree, free-list allocator
-- `vmm.c` — tambah `vmm_map_page()` publik (sebelumnya cuma identity-map sekali pas boot)
-- (file-file sebelumnya tetap sama seperti update terakhir)
+- `vmm.c` — added public `vmm_map_page()` (previously only identity-mapped once during boot)
+- *(Previous files remain the same as the last update)*
 
-Sekarang baru bisa:
-- Boot via bootloader (GRUB, Multiboot)
-- GDT terpasang (flat memory model, sudah ada slot ring3 buat usermode nanti)
-- IDT + PIC remap, exception CPU (0-31) dan IRQ (32-47) ke-handle dengan benar
-- Keyboard IRQ-driven — CPU `hlt` waktu idle, nggak busy-loop 100% lagi
-- Print teks ke layar + scroll
-- Shell interaktif: `help`, `clear`, `mem`
+What it can do so far:
+- Boots via a bootloader (GRUB, Multiboot)
+- GDT installed (flat memory model, with ring3 slots ready for future usermode)
+- IDT + PIC remapped, CPU exceptions (0-31) and IRQs (32-47) handled properly
+- IRQ-driven keyboard — CPU executes `hlt` when idle, no more 100% CPU busy-loops
+- Text printing to screen + auto-scrolling
+- Interactive shell: `help`, `clear`, `mem`
 
-### Cara Ngebuild & Test (buat yang berani)
+### Building & Testing (For the brave)
 
 ```bash
 cd OS
 make
-make run   # butuh qemu-system-i386
+make run   # requires qemu-system-i386
 ```
 
-(Butuh nasm, i686-elf-gcc cross-compiler, qemu, dll. Setupnya agak ribet, ini bukan buat pemula)
+*(You'll need nasm, an i686-elf-gcc cross-compiler, qemu, etc. Setup is a bit tedious—not really meant for beginners)*
 
-### Tujuanku
-Roadmap berikutnya, urut prioritas:
-1. ~~Paging / virtual memory~~ ✅ selesai (v0.2.0)
-2. ~~Heap proper (`kmalloc`/`kfree`)~~ ✅ selesai (v0.3.0)
-3. Ring 0 → Ring 3 (usermode + syscall)
-4. Driver disk (ATA/AHCI) + filesystem sederhana
-5. ELF loader — biar bisa jalanin program eksternal beneran
-6. Multitasking (butuh heap + stack per-task yang udah proper dulu)
+### Goals / Roadmap
+Next up, in prioritized order:
+1. ~~Paging / virtual memory~~ ✅ Done (v0.2.0)
+2. ~~Proper Heap (`kmalloc`/`kfree`)~~ ✅ Done (v0.3.0)
+3. Ring 0 → Ring 3 (usermode + syscalls)
+4. Disk driver (ATA/AHCI) + simple filesystem
+5. ELF loader — so it can run actual external executables
+6. Multitasking (requires a proper heap + per-task stacks first)
 
-Kalau lu juga lagi gabut dan suka ngoprek low-level, silakan fork & ikut gabut bareng 😂
+If you're bored out of your mind and love messing around with low-level dev, feel free to fork & join the club 😂
 
-Made with ❤️ + kopi + insomnia
-by Makluk Gabut
+Made with ❤️ + coffee + insomnia  
+by *Makluk Gabut*
