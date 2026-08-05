@@ -12,6 +12,10 @@
 #include "pmm.h"
 #include "vmm.h"
 #include "heap.h"
+#include "tss.h"
+#include "usermode.h"
+
+extern uint32_t stack_top;
 
 int strcmp(const char* s1, const char* s2) {
     while (*s1 && (*s1 == *s2)) { s1++; s2++; }
@@ -20,7 +24,9 @@ int strcmp(const char* s1, const char* s2) {
 
 static void execute_command(char* cmd) {
     if (strcmp(cmd, "help") == 0) {
-        print_string("Available commands: help, clear, mem, uptime, pages, alloctest\n");
+        print_string("Available commands: help, clear, mem, uptime, pages, alloctest, usermode\n");
+    } else if (strcmp(cmd, "usermode") == 0) {
+        usermode_run_demo();
     } else if (strcmp(cmd, "clear") == 0) {
         clear_screen();
     } else if (strcmp(cmd, "pages") == 0) {
@@ -111,7 +117,7 @@ void kernel_main(uint32_t magic, uint32_t mb_info_addr) {
     serial_write("=== GabutOS booting ===\n");
 
     clear_screen();
-    print_string("GabutOS v0.3.1 - GDT + IDT + Paging + Heap + Serial\n");
+    print_string("GabutOS v0.4.0 - Ring 0 -> Ring 3 + Syscall\n");
     print_string("=========================================\n");
 
     gdt_install();
@@ -140,6 +146,12 @@ void kernel_main(uint32_t magic, uint32_t mb_info_addr) {
 
         heap_init();
         print_string("[ok] Heap kmalloc/kfree (free-list) siap\n");
+
+        tss_install(0x10, (uint32_t)&stack_top);
+        print_string("[ok] TSS terpasang\n");
+
+        usermode_install();
+        print_string("[ok] Syscall (int 0x80) siap, ketik 'usermode' buat coba ring3\n");
     }
 
     asm volatile ("sti");

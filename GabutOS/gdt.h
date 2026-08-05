@@ -18,5 +18,6 @@ struct gdt_ptr {
 } __attribute__((packed));
 
 void gdt_install(void);
+void gdt_set_tss_gate(uint32_t base, uint32_t limit);
 
 #endif

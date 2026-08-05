@@ -1,6 +1,6 @@
 #include "gdt.h"
 
-#define GDT_ENTRIES 5
+#define GDT_ENTRIES 6
 
 static struct gdt_entry gdt[GDT_ENTRIES];
 static struct gdt_ptr gp;
@@ -28,6 +28,12 @@ void gdt_install(void) {
     gdt_set_gate(2, 0, 0xFFFFFFFF, 0x92, 0xCF);
     gdt_set_gate(3, 0, 0xFFFFFFFF, 0xFA, 0xCF);
     gdt_set_gate(4, 0, 0xFFFFFFFF, 0xF2, 0xCF);
+    gdt_set_gate(5, 0, 0, 0, 0);
 
+    gdt_flush((uint32_t)&gp);
+}
+
+void gdt_set_tss_gate(uint32_t base, uint32_t limit) {
+    gdt_set_gate(5, base, limit, 0x89, 0x00);
     gdt_flush((uint32_t)&gp);
 }

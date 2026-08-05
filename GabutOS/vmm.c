@@ -32,13 +32,13 @@ static void page_fault_handler(struct registers* regs) {
 void vmm_init(void) {
 
     for (uint32_t i = 0; i < 1024; i++) {
-        first_page_table[i] = (i * 4096) | PAGE_PRESENT | PAGE_RW;
+        first_page_table[i] = (i * 4096) | PAGE_PRESENT | PAGE_RW | PAGE_USER;
     }
 
     for (uint32_t i = 0; i < 1024; i++) {
         page_directory[i] = 0;
     }
-    page_directory[0] = ((uint32_t)first_page_table) | PAGE_PRESENT | PAGE_RW;
+    page_directory[0] = ((uint32_t)first_page_table) | PAGE_PRESENT | PAGE_RW | PAGE_USER;
 
     register_interrupt_handler(14, page_fault_handler);
 
@@ -69,7 +69,7 @@ uint32_t vmm_map_page(uint32_t virtual_addr, uint32_t physical_addr, uint32_t fl
         uint32_t* new_table = (uint32_t*)table_phys;
         for (int i = 0; i < 1024; i++) new_table[i] = 0;
 
-        page_directory[pd_index] = (table_phys & 0xFFFFF000) | PAGE_PRESENT | PAGE_RW;
+        page_directory[pd_index] = (table_phys & 0xFFFFF000) | PAGE_PRESENT | PAGE_RW | PAGE_USER;
     }
 
     uint32_t* table = (uint32_t*)(page_directory[pd_index] & 0xFFFFF000);

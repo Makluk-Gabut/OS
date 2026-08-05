@@ -1,83 +1,119 @@
-# Gabut OS
+# GabutOS
 
-**Gabut OS** is a 32-bit x86 hobby operating system developed from scratch. This project implements fundamental operating system kernel concepts including memory management, interrupt handling, and basic hardware drivers.
+A hobby x86 kernel built from scratch, booted via GRUB (Multiboot1). This document explains the design rationale behind every module — the "why", not just the "what" — since the source files themselves are kept comment-free.
 
----
+## Boot Sequence
 
-## 🚀 Key Features & Components
+`GRUB` loads the kernel per the Multiboot1 spec. The Multiboot header (magic `0x1BADB002`, alignment + memory-info flags, checksum) lives in `assembler.asm` and must appear within the first 8KB of the file for GRUB to recognize it.
 
-The kernel is built with a modular architecture consisting of the following core components:
+At entry (`_start`):
+1. Stack pointer is initialized (16 bytes aligned, per the x86 C ABI requirement).
+2. Interrupts stay off (`cli`) — this is safe because `kernel_main()` installs GDT, IDT, and remaps the PIC before ever calling `sti` itself.
+3. GRUB leaves `EAX` = Multiboot magic (`0x2BADB002`) and `EBX` = pointer to the `multiboot_info` struct. Following cdecl (arguments pushed right-to-left), `EBX` is pushed first, then `EAX`, so `kernel_main(magic, mb_info_addr)` receives them correctly.
+4. A hang loop (`cli; hlt; jmp`) exists as a safety net, though it should never be reached since `shell()` runs forever.
 
-* **Kernel Core (`kernel.c`)**: The main kernel entry point that initializes all subsystems.
-* **Bootloader Compliance (`multiboot.h`, `linker.ld`)**: Complies with the Multiboot specification to support booting via GRUB or emulators (QEMU/Bochs).
-* **Global Descriptor Table / GDT (`gdt.c`, `gdt.h`, `gdt_flush.asm`)**: Configures x86 memory protection and segmentation.
-* **Interrupt System (`idt.c`, `idt.h`, `interrupts.c`, `isr.asm`, `idt_flush.asm`)**:
-  * **Interrupt Descriptor Table (IDT)** for handling hardware and software interrupt routines.
-  * **Interrupt Service Routines (ISR)** & **IRQ (Interrupt Request)** handling.
-* **Memory Management**:
-  * **Physical Memory Manager / PMM (`pmm.c`, `pmm.h`)**: Manages physical page frame allocation.
-  * **Virtual Memory Manager / VMM (`vmm.c`, `vmm.h`)**: Implements x86 paging for virtual-to-physical memory mapping.
-* **Drivers & Hardware I/O**:
-  * **Screen Driver (`screen.c`, `screen.h`)**: Handles text output to the VGA text mode buffer (80x25).
-  * **Keyboard Driver (`keyboard.c`, `keyboard.h`)**: Handles input from PS/2 keyboards.
-  * **Programmable Interval Timer / PIT (`pit.c`, `pit.h`)**: Manages hardware system ticks and timing.
-  * **Port I/O Helper (`io.h`)**: Inline assembly helpers for hardware I/O port communication (`inb`, `outb`).
+`linker.ld` places the kernel starting at 1MB (the conventional load address GRUB uses) and exports `kernel_start`/`kernel_end` symbols so the physical memory manager knows which physical pages the kernel itself occupies.
 
----
+## GDT (`gdt.c`, `gdt_flush.asm`)
 
-## 📂 Project Directory Structure
+Five flat-model descriptors: null, kernel code (ring 0), kernel data (ring 0), user code (ring 3), user data (ring 3). The user-mode descriptors are set up now even though nothing uses them yet — they're there for when usermode is implemented later.
 
-```text
-OS/
-├── assembler.asm             # Initial assembly entry point (bootloader wrapper)
-├── gdt.c / gdt.h             # GDT setup and management
-├── gdt_flush.asm             # Reloads GDT segment registers
-├── idt.c / idt.h             # IDT initialization and gate setup
-├── idt_flush.asm             # Loads IDTR register
-├── interrupts.c              # C-level ISR & IRQ handlers
-├── isr.asm                   # Low-level assembly ISR/IRQ wrappers
-├── io.h                      # Low-level port I/O routines
-├── kernel.c                  # Main kernel entry point
-├── keyboard.c / keyboard.h   # PS/2 keyboard driver
-├── linker.ld                 # Linker script for kernel memory layout
-├── Makefile                  # Main build script
-├── Makefile.tested-with-gcc-m32 # Build configuration tested with 32-bit GCC
-├── multiboot.h               # Multiboot header definitions
-├── pit.c / pit.h             # Programmable Interval Timer driver
-├── pmm.c / pmm.h             # Physical Memory Manager
-├── screen.c / screen.h       # VGA text mode screen driver
-├── status.md                 # Development status and progress notes
-└── vmm.c / vmm.h             # Virtual Memory Manager (Paging)
-```
----
+`gdt_flush.asm` loads the GDT via `lgdt`, then reloads every segment register: `DS/ES/FS/GS/SS` get the kernel data selector (`0x10` = index 2 × 8), and a far jump to `0x08:.flush` (kernel code selector, index 1 × 8) reloads `CS`, which can't be set with a plain `mov`.
 
-## 🛠️ Prerequisites
-To build and run this OS, you will need a 32-bit x86 cross-compiler toolchain:
+## IDT / Interrupts (`idt.c`, `isr.asm`, `interrupts.c`, `io.h`)
 
-GCC (with -m32 target support or i686-elf-gcc)
+256 IDT gates are populated: 32 CPU exceptions (vectors 0–31) and 16 hardware IRQs (vectors 32–47). The PIC is remapped first — by default, IRQ0–15 fire on interrupts 8–15 and 0x70–0x77, which collide with CPU exception vectors. Remapping moves them to 32–47, out of the way.
 
-NASM (Netwide Assembler)
+`isr.asm` defines two macros: `ISR_NOERRCODE` for exceptions where the CPU doesn't push an error code (a dummy `0` is pushed instead, so the stack layout stays consistent across all exception handlers), and `ISR_ERRCODE` for the ones that do (double fault, GPF, page fault, etc.). Both funnel into a common stub that saves all registers (`pusha`), switches to the kernel data segment, calls the C-level dispatcher, restores everything, and `iret`s.
 
-GNU Make
+`interrupts.c` (originally named `isr.c`) holds `isr_handler()` (panics with the exception name if unregistered) and `irq_handler()` (sends End-Of-Interrupt to the PIC — and to the slave PIC too, if the IRQ came from vector ≥40 — before dispatching to the registered handler).
 
-QEMU (qemu-system-i386) for emulator testing
+**Naming note:** the C file is called `interrupts.c`, not `isr.c`, because `isr.c` and `isr.asm` would both compile to `isr.o` and silently overwrite each other during the build — a real bug that was caught by actually compiling and testing, not just by reading the code.
 
-## ⚙️ Building & Running
+## PIT Timer (`pit.c`)
 
-### 1. Compile the Kernel:
-```Bash
+Configured for 100Hz (channel 0, mode 3 square wave, lobyte/hibyte access). `1193182 / hz` gives the 16-bit divisor written to the PIT. `sleep_ms()` converts milliseconds to ticks and `hlt`s the CPU until the tick counter reaches the target — this saves power compared to a busy-wait spin loop, since `hlt` lets the CPU idle until the next interrupt wakes it.
+
+## Keyboard (`keyboard.c`)
+
+IRQ1-driven, not polled. A small circular buffer holds incoming characters; the interrupt handler reads the scancode from port `0x60`, discards key-release events (bit 7 set), maps the scancode to ASCII via a lookup table, and pushes it into the buffer. `keyboard_getchar()` blocks by `hlt`-ing until the buffer is non-empty — power-efficient, and it composes naturally with the PIT interrupt also firing during the wait.
+
+## VGA Screen + Serial (`screen.c`, `serial.c`)
+
+`screen.c` writes directly to the VGA text buffer at `0xB8000`, handles newline/backspace, and auto-scrolls when the cursor passes the last row.
+
+`serial.c` drives COM1 (`0x3F8`) at 38400 baud, 8N1, with FIFO enabled. It's polling-based (no interrupts) since kernel logging doesn't need to be non-blocking. `print_char()` in `screen.c` mirrors every character to serial as well, so all existing `print_string`/`print_dec`/`print_hex` calls anywhere in the kernel automatically get logged to serial without needing to touch those call sites. This makes debugging dramatically easier: `qemu ... -serial file:log.txt` produces a plain-text boot log instead of needing a VGA screenshot or a manual VGA-buffer memory dump to verify output.
+
+## Physical Memory Manager (`pmm.c`, `multiboot.h`)
+
+A bitmap allocator capped at 256MB (`MAX_SUPPORTED_MEM`) — comfortably more than QEMU's default 128MB and plenty for a hobby OS at this stage; raising the cap later just means growing the bitmap.
+
+Initialization defaults every page to "used" (the safe default), then walks the Multiboot memory map (`mbi->mmap_addr`/`mmap_length`) and clears the bit for each page inside an `available`-type region. Per the Multiboot spec, each `mmap` entry's `size` field does *not* include itself, so the iteration step is `entry->size + sizeof(entry->size)`.
+
+If GRUB doesn't provide a detailed memory map, it falls back to `mem_upper` (kilobytes of memory starting at 1MB) as a coarser estimate. If neither flag is set, every page stays marked "used" — `pmm_alloc_page()` will always fail rather than silently handing out memory that was never confirmed available.
+
+Two regions are force-reserved regardless of what the memory map claims:
+- The first 1MB (256 pages) — the IVT, BIOS data area, and the VGA text buffer all live here.
+- The kernel's own physical footprint, computed from the linker-exported `kernel_start`/`kernel_end` symbols — otherwise the allocator could hand out memory the kernel is actively running from.
+
+## Paging / Virtual Memory Manager (`vmm.c`)
+
+`vmm_init()` identity-maps the first 4MB (one page directory entry pointing at one page table, 1024 × 4KB entries) — enough to cover the kernel and the VGA buffer, which conveniently falls within this range. `CR3` is loaded with the page directory's physical address, then `CR0`'s PG bit (bit 31) is set to actually turn paging on. A page fault handler is registered on vector 14 that reads `CR2` (the faulting address) and decodes the error code's bits (present/write/user) before halting.
+
+`vmm_map_page()` extends mappings beyond that initial 4MB, allocating new page tables on demand via the PMM. **This has a known, deliberate limitation:** a freshly allocated page table has to be zeroed out, and that's only safe through an address that's already mapped. Since the identity-map only covers the first 4MB, if `pmm_alloc_page()` ever returns a physical address at or above `0x400000` for a *new page table itself*, there's currently no way to safely zero it — a temporary mapping mechanism for that case hasn't been implemented yet. Rather than risk silent memory corruption, `vmm_map_page()` panics explicitly if this happens. In practice it's unlikely to trigger at this stage, since the PMM hands out low-numbered (and thus low-address) pages early on — but it's a real edge case worth fixing before the heap or any allocator sees much heavier use.
+
+## Heap Allocator (`heap.c`)
+
+A free-list allocator (`kmalloc`/`kfree`) that replaced an earlier bump allocator (which had no `free()` at all). The heap lives in its own virtual address range, `0x400000`–`0x800000` (right after the initial identity-mapped region, up to a 4MB cap for now), and grows lazily: it only calls `vmm_map_page()` for a new physical page when it actually needs more space.
+
+`kmalloc()` is first-fit: it walks the block list looking for a free block big enough, splitting it if the leftover is large enough to be useful on its own. If nothing fits, it extends the heap sbrk-style — mapping new pages as needed and appending a fresh block at the end.
+
+`kfree()` marks a block free and merges it forward with the next block if that one is also free and directly adjacent in memory. **Known limitation:** it only merges forward, not backward — a proper backward merge would need a doubly-linked list, which hasn't been added yet. This means some fragmentation can accumulate in patterns a smarter allocator would avoid, though it doesn't affect correctness.
+
+## Shell (`kernel.c`)
+
+A simple line-based REPL. Commands: `help`, `clear`, `mem` (heap stats), `uptime` (PIT ticks), `pages` (physical memory stats), `alloctest` (allocates three blocks, frees the middle one, allocates a new block, and reports whether it landed in the freed block's old address — a live demonstration that `kfree()` reuse is actually working, not just "not crashing").
+
+## Verified Behavior
+
+Every major feature in this repo was checked by actually compiling and booting the kernel in QEMU — not just read for correctness. That included: confirming `CR0`/`CR3` register state after enabling paging, confirming the PIT interrupt kept firing normally after paging was turned on (proving the transition didn't break interrupt handling), reading the VGA text buffer directly out of guest physical memory to confirm shell output byte-for-byte, and — since the serial driver was added — simply reading the QEMU serial log file, which is now the easiest way to check behavior end-to-end.
+
+Three real bugs were found this way (not from code review alone):
+1. `isr.c` and `isr.asm` both compiling to `isr.o`, silently overwriting each other and leaving `isr_handler`/`irq_handler` unlinked — fixed by renaming the C file to `interrupts.c`.
+2. The linker inserting a `.note.gnu.build-id` section before `.text`, pushing the Multiboot header past the 8KB boundary GRUB scans — fixed with `--build-id=none`.
+3. Modern GCC defaulting to PIE executables, which GRUB can't load as a flat kernel — fixed with `-no-pie`.
+
+## Usermode (Ring 0 → Ring 3) (`tss.c`, `usermode.c`, `usermode_asm.asm`)
+
+A minimal TSS (Task State Segment) is installed in GDT slot 5. In this design the TSS's only real job is holding `ss0`/`esp0` — the kernel stack the CPU should switch to automatically whenever an interrupt or syscall arrives while running in ring 3. (The other TSS fields exist only because the struct format requires them; they're not used for hardware task-switching, which this kernel doesn't do.)
+
+`enter_usermode()` (assembly) performs the ring0→ring3 transition: it reloads the data segment registers with the ring-3 selector, then manually pushes the five values `iret` expects — `SS`, `ESP`, `EFLAGS`, `CS`, `EIP` — and executes `iret`, which the CPU interprets as "return" to a lower privilege level, changing CPL to 3 in the process. The function takes care to load the entry point and user stack address into `ECX`/`EDX` *before* touching `AX` for the segment reload, since overwriting `AX` would otherwise clobber whichever argument happened to share its register.
+
+A syscall gate is installed at interrupt vector `0x80` (128) with DPL=3 in its IDT flags (`0xEE` instead of the usual `0x8E`) — this is the one bit that actually lets ring-3 code invoke `int 0x80` at all; every other gate stays DPL=0 and would fault if called from ring 3. The handler (`usermode.c`) currently implements a single syscall, `SYS_PRINT`, which writes the character passed in `EBX` to the screen — proving that ring-3 code can only reach the display through a kernel-mediated call, not by touching the VGA buffer through its own instructions.
+
+The demo (`usermode` shell command) allocates one physical page for a user stack, maps it at `0xA00000` with the `PAGE_USER` bit set, jumps into a small `ring3_task()` function that prints a message via syscalls, and then **deliberately executes `cli`** — a privileged instruction. Since `cli` is checked purely against CPL regardless of paging permissions, this reliably triggers a General Protection Fault (vector 13), which the existing exception handler catches and reports before halting. This is the actual proof that ring-3 isolation is enforced by the CPU, not just that the `iret` "worked" without crashing.
+
+**Known, deliberate limitations at this stage — this is a proof-of-concept transition, not process isolation:**
+- `ring3_task()`'s compiled code physically lives inside the kernel's own identity-mapped first 4MB. To let the CPU even *fetch* its instructions from ring 3, the `PAGE_USER` bit had to be added to that entire identity-mapped region (previously kernel-only). That means, as of this version, ring-3 code could in principle also reach the VGA buffer or other low-memory structures directly, bypassing the syscall path — the syscall demo proves the *mechanism* works, but doesn't yet enforce that it's the *only* path.
+- The `usermode` command is one-shot by design: once `cli` triggers the GPF, the kernel halts permanently (the default panic behavior for any unregistered/fatal exception). There's no scheduler yet to tear down a faulting task and return control to the shell — that requires the multitasking milestone still ahead on the roadmap.
+- Real process isolation (a user program that *can't* read kernel memory or other processes' memory at all) needs a separate page directory per process, not just a `PAGE_USER` bit sprinkled onto a single shared address space. That's a substantially larger undertaking than what's here.
+
+## Roadmap
+
+1. ~~Paging / virtual memory~~ — done (v0.2.0)
+2. ~~Heap (`kmalloc`/`kfree`)~~ — done (v0.3.0)
+3. ~~Serial driver~~ — done (v0.3.1)
+4. ~~Ring 0 → Ring 3 (usermode + syscalls)~~ — done (v0.4.0)
+5. Disk driver (ATA/AHCI) + a simple filesystem
+6. ELF loader
+7. Multitasking (PIT-driven context switching, and a way to kill a faulting ring-3 task without halting the whole kernel)
+
+## Building
+
+```bash
+cd OS
 make
+make run   # requires qemu-system-i386
 ```
 
-### 2. Run in QEMU:
-```Bash
-qemu-system-i386 -kernel OS.bin
-```
-
-### 3. Clean Build Artifacts:
-```Bash
-make clean
-```
-
-### 📜 License
-This project is licensed under the GNU General Public License v2.0 (GPLv2). You are free to modify, distribute, and build upon this project, provided that all derivative work remains open-source under the same license terms.
+Requires `nasm`, an `i686-elf-gcc` cross-compiler, and `qemu-system-i386`. A secondary `Makefile.tested-with-gcc-m32` is included as a fallback for environments without the cross-compiler (uses host `gcc -m32` plus a few extra linker flags to compensate for differences from a true `i686-elf` toolchain).

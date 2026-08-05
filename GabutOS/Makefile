@@ -10,8 +10,8 @@ LD = i686-elf-ld
 CFLAGS = -std=gnu99 -ffreestanding -O2 -Wall -Wextra
 
 # Semua objek yang perlu di-link
-C_SOURCES = kernel.c screen.c serial.c gdt.c idt.c interrupts.c keyboard.c pit.c pmm.c vmm.c heap.c
-ASM_SOURCES = assembler.asm gdt_flush.asm idt_flush.asm isr.asm
+C_SOURCES = kernel.c screen.c serial.c gdt.c idt.c interrupts.c keyboard.c pit.c pmm.c vmm.c heap.c tss.c usermode.c
+ASM_SOURCES = assembler.asm gdt_flush.asm idt_flush.asm isr.asm usermode_asm.asm
 
 C_OBJECTS = $(C_SOURCES:.c=.o)
 ASM_OBJECTS = $(ASM_SOURCES:.asm=.o)
