@@ -147,7 +147,8 @@ This was tested across two *separate* QEMU boots against the same disk image fil
 4. ~~Ring 0 → Ring 3 (usermode + syscalls)~~ — done (v0.4.0)
 5. ~~Disk driver (ATA PIO) + flat filesystem~~ — done (v0.5.0)
 6. ELF loader — load a program from disk and run it, instead of jumping to a hardcoded function pointer like the current usermode demo
-7. Multitasking (PIT-driven context switching, and a way to kill a faulting ring-3 task without halting the whole kernel)
+7. Multitasking (PIT-driven context switching, and a way to kill a faulting ring-3 task without halting the whole kernel) (the biggest milestone)
+8. Maybe 64 bit architecture if i had enough time
 
 ## Building
 
@@ -158,3 +159,7 @@ make run   # requires qemu-system-i386
 ```
 
 Requires `nasm`, an `i686-elf-gcc` cross-compiler, and `qemu-system-i386`. A secondary `Makefile.tested-with-gcc-m32` is included as a fallback for environments without the cross-compiler (uses host `gcc -m32` plus a few extra linker flags to compensate for differences from a true `i686-elf` toolchain).
+
+the 0.0.1 version is in my other repo: https://github.com/Makluk-Gabut/Gabut-Playground
+
+OH MY GOD IM SO CLOSE TO MULTITASKING yes sooo far away
