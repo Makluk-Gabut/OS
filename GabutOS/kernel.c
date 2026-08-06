@@ -14,6 +14,7 @@
 #include "heap.h"
 #include "tss.h"
 #include "usermode.h"
+#include "fs.h"
 
 extern uint32_t stack_top;
 
@@ -22,9 +23,58 @@ int strcmp(const char* s1, const char* s2) {
     return *(const unsigned char*)s1 - *(const unsigned char*)s2;
 }
 
+static uint32_t strlen_local(const char* s) {
+    uint32_t n = 0;
+    while (s[n] != '\0') n++;
+    return n;
+}
+
+static int starts_with(const char* str, const char* prefix) {
+    while (*prefix) {
+        if (*str != *prefix) return 0;
+        str++;
+        prefix++;
+    }
+    return 1;
+}
+
 static void execute_command(char* cmd) {
     if (strcmp(cmd, "help") == 0) {
-        print_string("Available commands: help, clear, mem, uptime, pages, alloctest, usermode\n");
+        print_string("Available commands: help, clear, mem, uptime, pages, alloctest, usermode, fsformat, ls, cat <nama>, fstest\n");
+    } else if (strcmp(cmd, "fsformat") == 0) {
+        fs_format();
+        print_string("Filesystem baru dibuat (semua data lama, kalau ada, hilang).\n");
+    } else if (strcmp(cmd, "ls") == 0) {
+        fs_list();
+    } else if (starts_with(cmd, "cat ")) {
+        const char* filename = cmd + 4;
+        uint8_t buf[2048];
+        uint32_t size;
+        if (fs_read(filename, buf, sizeof(buf) - 1, &size)) {
+            uint32_t to_print = size < sizeof(buf) - 1 ? size : sizeof(buf) - 1;
+            buf[to_print] = '\0';
+            print_string((char*)buf);
+            print_string("\n");
+        } else {
+            print_string("File gak ketemu: ");
+            print_string(filename);
+            print_string("\n");
+        }
+    } else if (strcmp(cmd, "fstest") == 0) {
+        const char* content = "Halo dari GabutOS! Data ini beneran nempel di disk (bukan cuma RAM).\n";
+        if (fs_write("hello.txt", (const uint8_t*)content, strlen_local(content))) {
+            print_string("Nulis hello.txt sukses.\n");
+        } else {
+            print_string("Gagal nulis (tabel file penuh atau belum di-format?)\n");
+        }
+
+        uint8_t buf[256];
+        uint32_t size;
+        if (fs_read("hello.txt", buf, sizeof(buf) - 1, &size)) {
+            buf[size < sizeof(buf) - 1 ? size : sizeof(buf) - 1] = '\0';
+            print_string("Baca balik dari disk: ");
+            print_string((char*)buf);
+        }
     } else if (strcmp(cmd, "usermode") == 0) {
         usermode_run_demo();
     } else if (strcmp(cmd, "clear") == 0) {
@@ -117,7 +167,7 @@ void kernel_main(uint32_t magic, uint32_t mb_info_addr) {
     serial_write("=== GabutOS booting ===\n");
 
     clear_screen();
-    print_string("GabutOS v0.4.0 - Ring 0 -> Ring 3 + Syscall\n");
+    print_string("GabutOS v0.5.0 - Disk Driver + Filesystem\n");
     print_string("=========================================\n");
 
     gdt_install();
@@ -152,6 +202,12 @@ void kernel_main(uint32_t magic, uint32_t mb_info_addr) {
 
         usermode_install();
         print_string("[ok] Syscall (int 0x80) siap, ketik 'usermode' buat coba ring3\n");
+
+        if (fs_mount()) {
+            print_string("[ok] Filesystem di-mount dari disk\n");
+        } else {
+            print_string("[warn] Filesystem belum ada, jalankan 'fsformat' dulu\n");
+        }
     }
 
     asm volatile ("sti");
