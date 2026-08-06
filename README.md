@@ -2,6 +2,20 @@
 
 A hobby x86 kernel built from scratch, booted via GRUB (Multiboot1). This document explains the design rationale behind every module — the "why", not just the "what" — since the source files themselves are kept comment-free.
 
+## Directory Structure
+
+```
+GabutOS/
+├── kernel.c          orchestrator: boots subsystems, shell, command dispatch
+├── boot/             Multiboot header, entry point, linker script
+├── cpu/              GDT, IDT, exception/IRQ handling, TSS, ring0<->ring3, port I/O
+├── mm/                physical + virtual memory management, heap allocator
+├── drivers/          VGA, serial, keyboard, PIT timer, ATA disk
+└── fs/                flat filesystem
+```
+
+Files reference each other with plain `#include "header.h"` regardless of which folder they're actually in — the Makefile's `-Icpu -Imm -Idrivers -Ifs` flags handle path resolution, so no include ever needs a relative path like `../cpu/idt.h`.
+
 ## Boot Sequence
 
 `GRUB` loads the kernel per the Multiboot1 spec. The Multiboot header (magic `0x1BADB002`, alignment + memory-info flags, checksum) lives in `assembler.asm` and must appear within the first 8KB of the file for GRUB to recognize it.
@@ -98,20 +112,47 @@ The demo (`usermode` shell command) allocates one physical page for a user stack
 - The `usermode` command is one-shot by design: once `cli` triggers the GPF, the kernel halts permanently (the default panic behavior for any unregistered/fatal exception). There's no scheduler yet to tear down a faulting task and return control to the shell — that requires the multitasking milestone still ahead on the roadmap.
 - Real process isolation (a user program that *can't* read kernel memory or other processes' memory at all) needs a separate page directory per process, not just a `PAGE_USER` bit sprinkled onto a single shared address space. That's a substantially larger undertaking than what's here.
 
+## Disk Driver + Filesystem (`ata.c`, `fs.c`)
+
+`ata.c` drives the primary ATA channel in PIO mode (ports `0x1F0`–`0x1F7`), LBA28 addressing, one sector (512 bytes) per operation — no DMA, no IRQ-driven transfer, purely polling `BSY`/`DRQ` status bits. This is the simplest correct way to talk to a disk and matches the polling pattern already used elsewhere in the kernel before the PIT/keyboard moved to interrupts.
+
+`fs.c` implements a deliberately minimal flat filesystem — no directories, no permissions, no deletion, nothing resembling FAT or ext2:
+
+- **Sector 0**: superblock (magic number, file count, and `next_free_lba` — a running pointer for the next unused data sector).
+- **Sectors 1–2**: a fixed file table, 32 entries × 32 bytes each (name, start sector, size in bytes, in-use flag) — sized so that exactly 16 entries fit per 512-byte sector, avoiding wasted space.
+- **Sector 3 onward**: file data, allocated by simply bumping `next_free_lba` forward by however many sectors a new file needs. There's no free-space reclamation — deleting a file (which isn't implemented anyway) wouldn't actually free its sectors for reuse.
+
+`fs_write()` finds an empty file-table slot, writes the data sector-by-sector (zero-padding the last partial sector), then updates and re-writes both the file table and the superblock. `fs_read()` looks up a file by exact name match and copies its sectors into the caller's buffer. `fs_mount()` reads the superblock and checks the magic number — if it doesn't match (a blank or foreign disk), mounting fails cleanly rather than treating garbage as a valid filesystem.
+
+### Verified Persistence
+
+This was tested across two *separate* QEMU boots against the same disk image file — not just within a single running session:
+
+1. **First boot**: formatted the disk, wrote a file, read it back, confirmed via serial log.
+2. **QEMU fully exited.**
+3. **Second boot, same disk image, no format or write commands issued**: `fs_mount()` succeeded (`[ok] Filesystem di-mount dari disk`), and `ls`/`cat` immediately showed the file written in the *previous* session — proving the data survived on the simulated disk itself, not just in RAM.
+
+### Known Limitations
+
+- No deletion, no free-space reclamation — the data area only ever grows.
+- No subdirectories; all files live in one flat table capped at 32 entries.
+- No collision/overwrite protection — writing a file with a name that already exists creates a second entry rather than replacing the first.
+- Single fixed drive (primary master) assumed; no drive detection or multi-disk support.
+
 ## Roadmap
 
 1. ~~Paging / virtual memory~~ — done (v0.2.0)
 2. ~~Heap (`kmalloc`/`kfree`)~~ — done (v0.3.0)
 3. ~~Serial driver~~ — done (v0.3.1)
 4. ~~Ring 0 → Ring 3 (usermode + syscalls)~~ — done (v0.4.0)
-5. Disk driver (ATA/AHCI) + a simple filesystem
-6. ELF loader
+5. ~~Disk driver (ATA PIO) + flat filesystem~~ — done (v0.5.0)
+6. ELF loader — load a program from disk and run it, instead of jumping to a hardcoded function pointer like the current usermode demo
 7. Multitasking (PIT-driven context switching, and a way to kill a faulting ring-3 task without halting the whole kernel)
 
 ## Building
 
 ```bash
-cd OS
+cd GabutOS
 make
 make run   # requires qemu-system-i386
 ```
