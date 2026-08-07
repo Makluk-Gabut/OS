@@ -15,6 +15,8 @@
 #include "tss.h"
 #include "usermode.h"
 #include "fs.h"
+#include "elf.h"
+#include "test_program.h"
 
 extern uint32_t stack_top;
 
@@ -40,7 +42,43 @@ static int starts_with(const char* str, const char* prefix) {
 
 static void execute_command(char* cmd) {
     if (strcmp(cmd, "help") == 0) {
-        print_string("Available commands: help, clear, mem, uptime, pages, alloctest, usermode, fsformat, ls, cat <nama>, fstest\n");
+        print_string("Available commands: help, clear, mem, uptime, pages, alloctest, usermode, fsformat, ls, cat <nama>, fstest, loadtest, run <nama>\n");
+    } else if (strcmp(cmd, "loadtest") == 0) {
+        if (fs_write("hello.elf", test_program_elf, test_program_elf_size)) {
+            print_string("hello.elf (");
+            print_dec(test_program_elf_size);
+            print_string(" bytes) ditulis ke disk.\n");
+        } else {
+            print_string("Gagal nulis (tabel file penuh atau belum di-format?)\n");
+        }
+    } else if (starts_with(cmd, "run ")) {
+        const char* filename = cmd + 4;
+        uint32_t buf_cap = 65536;
+        uint8_t* buf = (uint8_t*)kmalloc(buf_cap);
+        if (!buf) {
+            print_string("Gagal alokasi buffer buat load file.\n");
+        } else {
+            uint32_t size;
+            if (!fs_read(filename, buf, buf_cap, &size)) {
+                print_string("File gak ketemu: ");
+                print_string(filename);
+                print_string("\n");
+                kfree(buf);
+            } else {
+                if (size > buf_cap) {
+                    print_string("[warn] file lebih besar dari buffer loader (64KB), kepotong.\n");
+                    size = buf_cap;
+                }
+                uint32_t entry;
+                if (elf_load(buf, size, &entry)) {
+                    print_string("[elf] load sukses, lompat ke entry point...\n");
+                    usermode_jump(entry);
+                } else {
+                    print_string("[elf] gagal load (lihat pesan error di atas)\n");
+                }
+                kfree(buf);
+            }
+        }
     } else if (strcmp(cmd, "fsformat") == 0) {
         fs_format();
         print_string("Filesystem baru dibuat (semua data lama, kalau ada, hilang).\n");
@@ -167,7 +205,7 @@ void kernel_main(uint32_t magic, uint32_t mb_info_addr) {
     serial_write("=== GabutOS booting ===\n");
 
     clear_screen();
-    print_string("GabutOS v0.5.0 - Disk Driver + Filesystem\n");
+    print_string("GabutOS v0.6.0 - ELF Loader\n");
     print_string("=========================================\n");
 
     gdt_install();

@@ -78,3 +78,13 @@ uint32_t vmm_map_page(uint32_t virtual_addr, uint32_t physical_addr, uint32_t fl
     asm volatile ("invlpg (%0)" : : "r"(virtual_addr) : "memory");
     return 1;
 }
+
+int vmm_is_mapped(uint32_t virtual_addr) {
+    uint32_t pd_index = (virtual_addr >> 22) & 0x3FF;
+    uint32_t pt_index = (virtual_addr >> 12) & 0x3FF;
+
+    if (!(page_directory[pd_index] & PAGE_PRESENT)) return 0;
+
+    uint32_t* table = (uint32_t*)(page_directory[pd_index] & 0xFFFFF000);
+    return (table[pt_index] & PAGE_PRESENT) != 0;
+}

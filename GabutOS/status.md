@@ -60,7 +60,7 @@ Roadmap berikutnya, urut prioritas:
 3. ~~Serial driver~~ ✅ selesai (v0.3.1)
 4. ~~Ring 0 → Ring 3 (usermode + syscall)~~ ✅ selesai (v0.4.0)
 5. ~~Driver disk (ATA PIO) + filesystem flat sederhana~~ ✅ selesai (v0.5.0)
-6. ELF loader — load program dari disk (bukan cuma function pointer hardcoded kayak demo usermode)
+6. ~~ELF loader~~ ✅ selesai (v0.6.0)
 7. Multitasking (proses ring3 yang gak bikin kernel halt kalau ada pelanggaran)
 
 Kalau lu juga lagi gabut dan suka ngoprek low-level, silakan fork & ikut gabut bareng 😂

@@ -10,5 +10,6 @@
 void vmm_init(void);
 
 uint32_t vmm_map_page(uint32_t virtual_addr, uint32_t physical_addr, uint32_t flags);
+int vmm_is_mapped(uint32_t virtual_addr);
 
 #endif

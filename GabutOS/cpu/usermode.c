@@ -36,7 +36,7 @@ static void ring3_task(void) {
     }
 }
 
-void usermode_run_demo(void) {
+void usermode_jump(uint32_t entry_eip) {
     uint32_t stack_phys = pmm_alloc_page();
     if (stack_phys == 0) {
         print_string("[usermode] gagal alokasi stack fisik\n");
@@ -48,6 +48,10 @@ void usermode_run_demo(void) {
         return;
     }
 
+    enter_usermode(entry_eip, USER_STACK_VADDR + 4096);
+}
+
+void usermode_run_demo(void) {
     print_string("[usermode] lompat ke ring3...\n");
-    enter_usermode((uint32_t)ring3_task, USER_STACK_VADDR + 4096);
+    usermode_jump((uint32_t)ring3_task);
 }

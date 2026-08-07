@@ -11,7 +11,8 @@ GabutOS/
 ├── cpu/              GDT, IDT, exception/IRQ handling, TSS, ring0<->ring3, port I/O
 ├── mm/                physical + virtual memory management, heap allocator
 ├── drivers/          VGA, serial, keyboard, PIT timer, ATA disk
-└── fs/                flat filesystem
+├── fs/                flat filesystem
+└── loader/            ELF32 parser and loader
 ```
 
 Files reference each other with plain `#include "header.h"` regardless of which folder they're actually in — the Makefile's `-Icpu -Imm -Idrivers -Ifs` flags handle path resolution, so no include ever needs a relative path like `../cpu/idt.h`.
@@ -139,6 +140,38 @@ This was tested across two *separate* QEMU boots against the same disk image fil
 - No collision/overwrite protection — writing a file with a name that already exists creates a second entry rather than replacing the first.
 - Single fixed drive (primary master) assumed; no drive detection or multi-disk support.
 
+## ELF Loader (`elf.c`)
+
+`elf.c` parses a 32-bit ELF executable already sitting in a memory buffer (typically loaded there via `fs_read()`) and maps it into the address space so it can be jumped into via the existing `usermode_jump()` (the stack-setup-and-`enter_usermode()` helper factored out of the earlier usermode demo).
+
+Validation happens in order: file large enough to even contain an ELF header, magic bytes match `\x7fELF`, `e_type == ET_EXEC` (statically linked executable — no dynamic linking support at all), `e_machine == EM_386`, and the program header table falls within the file's actual bounds. For every `PT_LOAD` segment, its `p_vaddr` must be at or above `0x1000000` (16MB) — this is a hard floor, rejecting any segment that would land inside the kernel's own identity-mapped region (0–4MB), the heap's virtual range (4–8MB), or the fixed usermode demo stack (10MB) from the earlier usermode work. There's nothing sophisticated behind that number; it's just comfortably clear of everything else the kernel already uses.
+
+For each valid `PT_LOAD` segment, the loader page-aligns the segment's start and end, then for every page in that range not already mapped (checked via a new `vmm_is_mapped()` helper — this matters because two segments can share a boundary page, and mapping it twice would silently leak the first segment's already-written data along with a physical page) it allocates a fresh physical page and maps it with `PAGE_USER` set, so the code becomes both executable and readable from ring 3. The segment's file bytes are then copied in, and anything beyond `p_filesz` up to `p_memsz` is zeroed — that's the `.bss` region, which doesn't take up space in the file at all.
+
+### Verified End-to-End
+
+This wasn't tested with a synthetic or hand-crafted ELF — a real, independently compiled program was used:
+
+1. A minimal freestanding C program (`_start()`, no libc, invokes `int 0x80` with `eax=1` to print each character) was compiled and linked with `ld -T linker.ld -n` against a linker script placing `.text` at `0x1000000`, producing a genuine statically-linked `ET_EXEC`/`EM_386` binary confirmed via `readelf`.
+2. That binary's raw bytes were written to the GabutOS disk via `fs_write()` (through a temporary `loadtest` shell command — see the limitation note below on why this exists).
+3. `ls` confirmed the file landed correctly with the right size.
+4. `run hello.elf` triggered the full pipeline — read from disk, parse the ELF header, map its one `PT_LOAD` segment, jump to its entry point in ring 3 — and the program's own `int 0x80` syscall calls printed its message, confirming genuinely correct header parsing, segment mapping, and entry-point computation, not just "didn't crash."
+
+```
+GabutOS> run hello.elf
+[elf] load sukses, lompat ke entry point...
+Halo dari program ELF asli yang di-load dari disk!
+```
+
+Unlike the earlier `usermode` demo (which deliberately faults on a privileged `cli` to prove CPL enforcement), this program spins peacefully in an infinite loop afterward — a "well-behaved" complement to that earlier "misbehaving" demo, and further evidence the kernel didn't crash getting there.
+
+### Known Limitations
+
+- **No real way yet to get an arbitrary compiled program onto the disk from the host.** The `loadtest` command exists purely as a bootstrapping trick — it writes a byte array (`loader/test_program.h`) that was generated once by hand from a compiled ELF and embedded directly into the kernel source. This obviously doesn't scale to testing arbitrary programs; a proper host-side tool that writes files directly onto the raw disk image (mimicking `fs.c`'s on-disk layout without going through the kernel at all) is a clear near-term follow-up, separate from the loader itself.
+- No dynamic linking — only flat, statically-linked `ET_EXEC` binaries.
+- No meaningful security validation beyond the `0x1000000` floor — a maliciously crafted ELF could still target addresses that, while above the floor, overlap something else the kernel is using, or exhaust physical memory through an enormous `p_memsz`. Real protection needs the same per-process address space isolation noted as missing in the usermode section.
+- Like the `usermode` demo, if the loaded program does something that faults (bad memory access, privileged instruction, etc.), the kernel halts — there's still no way to tear down a single failed process and return to the shell.
+
 ## Roadmap
 
 1. ~~Paging / virtual memory~~ — done (v0.2.0)
@@ -146,9 +179,8 @@ This was tested across two *separate* QEMU boots against the same disk image fil
 3. ~~Serial driver~~ — done (v0.3.1)
 4. ~~Ring 0 → Ring 3 (usermode + syscalls)~~ — done (v0.4.0)
 5. ~~Disk driver (ATA PIO) + flat filesystem~~ — done (v0.5.0)
-6. ELF loader — load a program from disk and run it, instead of jumping to a hardcoded function pointer like the current usermode demo
-7. Multitasking (PIT-driven context switching, and a way to kill a faulting ring-3 task without halting the whole kernel) (the biggest milestone)
-8. Maybe 64 bit architecture if i had enough time
+6. ~~ELF loader~~ — done (v0.6.0)
+7. Multitasking (PIT-driven context switching, and a way to kill a faulting ring-3 task without halting the whole kernel)
 
 ## Building
 
@@ -159,7 +191,3 @@ make run   # requires qemu-system-i386
 ```
 
 Requires `nasm`, an `i686-elf-gcc` cross-compiler, and `qemu-system-i386`. A secondary `Makefile.tested-with-gcc-m32` is included as a fallback for environments without the cross-compiler (uses host `gcc -m32` plus a few extra linker flags to compensate for differences from a true `i686-elf` toolchain).
-
-the 0.0.1 version is in my other repo: https://github.com/Makluk-Gabut/Gabut-Playground
-
-OH MY GOD IM SO CLOSE TO MULTITASKING yes sooo far away
