@@ -42,7 +42,7 @@ struct elf32_phdr {
     uint32_t p_align;
 } __attribute__((packed));
 
-int elf_load(const uint8_t* data, uint32_t size, uint32_t* out_entry) {
+int elf_load(const uint8_t* data, uint32_t size, uint32_t* out_entry, int ring) {
     if (size < sizeof(struct elf32_ehdr)) {
         print_string("[elf] file terlalu kecil buat jadi ELF valid\n");
         return 0;
@@ -89,6 +89,7 @@ int elf_load(const uint8_t* data, uint32_t size, uint32_t* out_entry) {
 
         uint32_t seg_start = ph->p_vaddr & 0xFFFFF000;
         uint32_t seg_end = (ph->p_vaddr + ph->p_memsz + 4095) & 0xFFFFF000;
+        uint32_t page_flags = PAGE_PRESENT | PAGE_RW | (ring == 3 ? PAGE_USER : 0);
 
         for (uint32_t page_addr = seg_start; page_addr < seg_end; page_addr += 4096) {
             if (vmm_is_mapped(page_addr)) continue;
@@ -98,7 +99,7 @@ int elf_load(const uint8_t* data, uint32_t size, uint32_t* out_entry) {
                 print_string("[elf] kehabisan RAM fisik pas load segmen\n");
                 return 0;
             }
-            if (!vmm_map_page(page_addr, phys, PAGE_PRESENT | PAGE_RW | PAGE_USER)) {
+            if (!vmm_map_page(page_addr, phys, page_flags)) {
                 print_string("[elf] gagal map halaman segmen\n");
                 return 0;
             }

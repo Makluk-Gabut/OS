@@ -61,7 +61,9 @@ Roadmap berikutnya, urut prioritas:
 4. ~~Ring 0 → Ring 3 (usermode + syscall)~~ ✅ selesai (v0.4.0)
 5. ~~Driver disk (ATA PIO) + filesystem flat sederhana~~ ✅ selesai (v0.5.0)
 6. ~~ELF loader~~ ✅ selesai (v0.6.0)
-7. Multitasking (proses ring3 yang gak bikin kernel halt kalau ada pelanggaran)
+7. ~~Multitasking (round-robin, ring0+ring3 campur, sleep)~~ ✅ selesai (v0.7.0)
+8. Cara "bunuh" task yang crash tanpa halt seluruh kernel (masih gap dari v0.4.0/v0.6.0)
+9. Preemption adil buat task yang gak pernah blocking (starvation risk kalau ada task ring0 CPU-bound)
 
 Kalau lu juga lagi gabut dan suka ngoprek low-level, silakan fork & ikut gabut bareng 😂
 

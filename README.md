@@ -12,10 +12,11 @@ GabutOS/
 ├── mm/                physical + virtual memory management, heap allocator
 ├── drivers/          VGA, serial, keyboard, PIT timer, ATA disk
 ├── fs/                flat filesystem
-└── loader/            ELF32 parser and loader
+├── loader/            ELF32 parser and loader
+└── task/              task control blocks and the scheduler
 ```
 
-Files reference each other with plain `#include "header.h"` regardless of which folder they're actually in — the Makefile's `-Icpu -Imm -Idrivers -Ifs` flags handle path resolution, so no include ever needs a relative path like `../cpu/idt.h`.
+Files reference each other with plain `#include "header.h"` regardless of which folder they're actually in — the Makefile's `-Icpu -Imm -Idrivers -Ifs -Iloader -Itask` flags handle path resolution, so no include ever needs a relative path like `../cpu/idt.h`.
 
 ## Boot Sequence
 
@@ -172,6 +173,56 @@ Unlike the earlier `usermode` demo (which deliberately faults on a privileged `c
 - No meaningful security validation beyond the `0x1000000` floor — a maliciously crafted ELF could still target addresses that, while above the floor, overlap something else the kernel is using, or exhaust physical memory through an enormous `p_memsz`. Real protection needs the same per-process address space isolation noted as missing in the usermode section.
 - Like the `usermode` demo, if the loaded program does something that faults (bad memory access, privileged instruction, etc.), the kernel halts — there's still no way to tear down a single failed process and return to the shell.
 
+## Multitasking (`task/task.c`, `task/scheduler.c`)
+
+This is the largest structural change in the kernel so far, and the one piece explicitly built to run ring 0 and ring 3 tasks side by side in the same scheduler — a deliberately harder path than restricting everything to one ring, chosen because the tasks it schedules come straight from the ELF loader, and a real workload mixes both.
+
+### The Core Trick: Reusing the Interrupt Frame
+
+Rather than building a separate context-switch code path, the scheduler piggybacks on the interrupt mechanism that already exists. When the PIT fires, `irq_common_stub` (in `isr.asm`) already pushes a complete snapshot of the interrupted task's state onto its own kernel stack — general registers via `pusha`, then `EIP`/`CS`/`EFLAGS` (and `ESP`/`SS` too, if the interrupt came from ring 3) pushed automatically by the CPU itself. That pushed frame is a task's entire suspended state, sitting right there on its stack.
+
+So switching tasks means: save the *current* stack pointer (it now points at a complete, valid frame), pick a *different* task's previously-saved stack pointer, and load that instead — before the stub's `popa` and `iret` run. `iret` doesn't know or care whether it's resuming ring 0 or ring 3 code; it reads `CS` off the frame and switches privilege level automatically. One assembly path, both kinds of task, no branching on ring type anywhere in the switch logic.
+
+To make this possible, `irq_common_stub` was changed to pass `esp` as an actual argument to `irq_handler` (previously it passed the interrupt frame by value, which is fine for reading but useless for a scheduler that needs to substitute a different stack), and to load whatever `irq_handler` returns back into `esp` before `popa`/`iret` run. `irq_handler` itself now returns `scheduler_tick()`'s result — the *next* task's saved stack pointer if a switch happened, or the same one unchanged if not. `isr_common_stub` (used by CPU exceptions and the `int 0x80` syscall gate) got the identical treatment, for a reason covered below.
+
+### Building a Task From Nothing (`task_create`)
+
+A brand-new task obviously has no "previously interrupted" stack frame to resume — one has to be manufactured by hand, matching the exact byte layout the interrupt stub expects, so that the very first time this task is switched to, the stub's `popa`/`iret` sequence reconstructs a plausible "return" into the task's actual entry point instead of garbage.
+
+Two frame layouts exist, matching whether the CPU pushed `ESP`/`SS` (ring 3 target) or not (ring 0 target) — this mirrors exactly how the CPU behaves on a real interrupt: it only pushes the extra stack-switch fields when privilege level changes. Ring-3 tasks additionally get a dedicated one-page user stack allocated and mapped with `PAGE_USER`, separate from the kernel stack the interrupt frame itself lives on (a ring-3 task always has *two* stacks: the kernel one used only while inside an interrupt/syscall, and its own user-mode one used for everything else — this is exactly what the TSS's `esp0` field exists to point the CPU toward automatically).
+
+### Scheduler: Flat Round-Robin
+
+Initially the scheduler used four separate priority queues, always draining the highest non-empty one first. **This starved lower-priority tasks completely** in testing — the interactive shell (naturally given the highest priority) never blocks waiting for a syscall the way the demo tasks do; it just `hlt`s waiting for a keystroke, which still counts as "ready" from the scheduler's point of view. It kept winning every tick, and `A`/`B`/`C` from the lower-priority demo tasks never appeared at all in the first test run. The fix was to drop strict priority levels for a single flat FIFO ready queue — every ready task gets an equal turn, priority is still stored per-task for later use (e.g. weighting how *long* a turn lasts) but no longer decides *whether* a task's turn ever comes at all.
+
+### A Second Real Bug: Syscalls Needed To Switch Too
+
+`task_sleep_ms()` is invoked from the `SYS_SLEEP` syscall handler, reached through `int 0x80` — which goes through `isr_common_stub`, not `irq_common_stub`. Before that stub got the same "pass esp, load back the return value" treatment as the IRQ path, a sleeping task's syscall would mark it `TASK_SLEEPING` and then just... keep running anyway, because nothing actually swapped its stack out. Confirmed by an actual serial-log capture during testing: the log showed a single character being printed continuously without ever alternating, a strong hint that a task was executing well past the point it should have yielded. The fix mirrors the PIT path closely, but only forces a switch when a task genuinely just asked to sleep (`scheduler_maybe_switch()`, gated by a `pending_switch` flag set inside `task_sleep_ms()`) rather than on every syscall unconditionally.
+
+### Verified Behavior
+
+Three ELF tasks (two ring-3, one ring-0 — genuinely different privilege levels in the same run) were started via the `multitask` shell command, each printing a distinct letter (`A`, `B`, `C`) in a `print`-then-`sleep` loop with different sleep intervals, while the shell itself (also just another task in the same scheduler) remained fully interactive. Captured live from the serial log:
+
+```
+GabutOS> multitask
+3 task ditambahkan (A=ring3 prio1, B=ring3 prio2, C=ring0 prio1).
+GabutOS> ABCABACABACABABACABACABpAs
+  * shell (running, ring0, prio 0)
+    task-A(r3) (sleeping sampai tick 888)
+    task-B(r3) (sleeping sampai tick 878)
+    task-C(r0) (sleeping sampai tick 878)
+GabutOS> BCAABACABuptAimCe
+Ticks: 1026 (~10 detik sejak boot)
+```
+
+The `p` and `s` from typing `ps`, and `uptAimCe` from typing `uptime`, are visibly interleaved character-by-character with the `A`/`B`/`C` output — direct proof the shell (a keyboard-driven, ring-0 task) and the two ring-3 letter-printing tasks were genuinely being time-sliced against each other, not run sequentially. `ps` correctly reported all three background tasks as `sleeping` with distinct wake ticks matching their different sleep durations. The system ran continuously for over 15 seconds with output still alternating correctly at the end, with zero crashes beyond the two ordinary QEMU startup resets that appear in every test in this document.
+
+### Known Limitations
+
+- **No way yet to kill a faulting task.** This closes part of the gap noted in the usermode and ELF-loader sections, but only partly: a task that sleeps and wakes up cooperates fine, but a task that page-faults or executes a privileged instruction still triggers the kernel-wide panic-and-halt behavior described earlier, taking every other task down with it. A real "kill this one task and keep scheduling the rest" path is still future work.
+- **No true preemption for a task that never blocks.** The flat round-robin queue is fair *among tasks that eventually sleep or yield*, but a hypothetical ring-0 task stuck in a tight, non-yielding loop would still be re-queued and re-run every time its turn came up on a PIT tick, since the current switch only happens at tick boundaries — there's no forced timeslice cutoff mid-execution beyond that.
+- Each ring-3 task still shares the *same* page directory as the kernel and every other task — there's still no per-process address space isolation, same caveat as the usermode and ELF-loader sections. Multitasking here means multiple independent streams of execution, not multiple protected processes.
+
 ## Roadmap
 
 1. ~~Paging / virtual memory~~ — done (v0.2.0)
@@ -180,7 +231,9 @@ Unlike the earlier `usermode` demo (which deliberately faults on a privileged `c
 4. ~~Ring 0 → Ring 3 (usermode + syscalls)~~ — done (v0.4.0)
 5. ~~Disk driver (ATA PIO) + flat filesystem~~ — done (v0.5.0)
 6. ~~ELF loader~~ — done (v0.6.0)
-7. Multitasking (PIT-driven context switching, and a way to kill a faulting ring-3 task without halting the whole kernel)
+7. ~~Multitasking (round-robin, mixed ring0/ring3, sleep)~~ — done (v0.7.0)
+8. A way to kill a single faulting task instead of halting the whole kernel
+9. Fair preemption for a hypothetical never-blocking task (currently only switches at tick boundaries between otherwise-cooperative tasks)
 
 ## Building
 

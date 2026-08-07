@@ -3,9 +3,11 @@
 #include "screen.h"
 #include "pmm.h"
 #include "vmm.h"
+#include "scheduler.h"
 #include <stdint.h>
 
 #define SYS_PRINT 1
+#define SYS_SLEEP 2
 #define USER_STACK_VADDR 0xA00000u
 
 extern void enter_usermode(uint32_t entry_eip, uint32_t user_stack);
@@ -13,6 +15,8 @@ extern void enter_usermode(uint32_t entry_eip, uint32_t user_stack);
 static void syscall_handler(struct registers* regs) {
     if (regs->eax == SYS_PRINT) {
         print_char((char)regs->ebx);
+    } else if (regs->eax == SYS_SLEEP) {
+        task_sleep_ms(regs->ebx);
     } else {
         print_string("[syscall] unknown: ");
         print_hex(regs->eax);

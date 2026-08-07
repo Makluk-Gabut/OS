@@ -17,6 +17,11 @@
 #include "fs.h"
 #include "elf.h"
 #include "test_program.h"
+#include "demo_task_a.h"
+#include "demo_task_b.h"
+#include "demo_task_c.h"
+#include "task.h"
+#include "scheduler.h"
 
 extern uint32_t stack_top;
 
@@ -42,7 +47,40 @@ static int starts_with(const char* str, const char* prefix) {
 
 static void execute_command(char* cmd) {
     if (strcmp(cmd, "help") == 0) {
-        print_string("Available commands: help, clear, mem, uptime, pages, alloctest, usermode, fsformat, ls, cat <nama>, fstest, loadtest, run <nama>\n");
+        print_string("Available commands: help, clear, mem, uptime, pages, alloctest, usermode, fsformat, ls, cat <nama>, fstest, loadtest, run <nama>, multitask, ps\n");
+    } else if (strcmp(cmd, "multitask") == 0) {
+        if (scheduler_is_active()) {
+            print_string("Scheduler udah jalan. Reboot buat coba dari awal.\n");
+        } else {
+            scheduler_init();
+
+            struct task* shell_task = task_create_current("shell", 0);
+
+            uint32_t entry_a, entry_b, entry_c;
+            elf_load(demo_task_a_elf, demo_task_a_elf_size, &entry_a, 3);
+            elf_load(demo_task_b_elf, demo_task_b_elf_size, &entry_b, 3);
+            elf_load(demo_task_c_elf, demo_task_c_elf_size, &entry_c, 0);
+
+            struct task* task_a = task_create("task-A(r3)", entry_a, 3, 1);
+            struct task* task_b = task_create("task-B(r3)", entry_b, 3, 2);
+            struct task* task_c = task_create("task-C(r0)", entry_c, 0, 1);
+
+            scheduler_add_task(task_a);
+            scheduler_add_task(task_b);
+            scheduler_add_task(task_c);
+
+            print_string("3 task ditambahkan (A=ring3 prio1, B=ring3 prio2, C=ring0 prio1).\n");
+            print_string("Scheduler aktif -- huruf A/B/C bakal muncul berselang-seling.\n");
+            print_string("Shell (task ini) tetap bisa dipakai normal sambil task lain jalan.\n");
+
+            scheduler_start(shell_task);
+        }
+    } else if (strcmp(cmd, "ps") == 0) {
+        if (!scheduler_is_active()) {
+            print_string("Scheduler belum aktif. Jalankan 'multitask' dulu.\n");
+        } else {
+            scheduler_list();
+        }
     } else if (strcmp(cmd, "loadtest") == 0) {
         if (fs_write("hello.elf", test_program_elf, test_program_elf_size)) {
             print_string("hello.elf (");
@@ -70,7 +108,7 @@ static void execute_command(char* cmd) {
                     size = buf_cap;
                 }
                 uint32_t entry;
-                if (elf_load(buf, size, &entry)) {
+                if (elf_load(buf, size, &entry, 3)) {
                     print_string("[elf] load sukses, lompat ke entry point...\n");
                     usermode_jump(entry);
                 } else {
@@ -205,7 +243,7 @@ void kernel_main(uint32_t magic, uint32_t mb_info_addr) {
     serial_write("=== GabutOS booting ===\n");
 
     clear_screen();
-    print_string("GabutOS v0.6.0 - ELF Loader\n");
+    print_string("GabutOS v0.7.0 - Multitasking\n");
     print_string("=========================================\n");
 
     gdt_install();
