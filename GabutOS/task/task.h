@@ -20,11 +20,16 @@ struct task {
     enum task_state state;
     int priority;
     uint32_t wake_tick;
+    int killable;
+    uint32_t run_start_tick;
+    uint32_t* page_directory;
+    uint32_t user_stack_vaddr;
+    uint32_t user_stack_phys;
     char name[TASK_NAME_LEN];
     struct task* next;
 };
 
-struct task* task_create(const char* name, uint32_t entry, int ring, int priority);
+struct task* task_create(const char* name, uint32_t entry, int ring, int priority, uint32_t* page_directory);
 struct task* task_create_current(const char* name, int priority);
 
 #endif

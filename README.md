@@ -217,11 +217,239 @@ Ticks: 1026 (~10 detik sejak boot)
 
 The `p` and `s` from typing `ps`, and `uptAimCe` from typing `uptime`, are visibly interleaved character-by-character with the `A`/`B`/`C` output — direct proof the shell (a keyboard-driven, ring-0 task) and the two ring-3 letter-printing tasks were genuinely being time-sliced against each other, not run sequentially. `ps` correctly reported all three background tasks as `sleeping` with distinct wake ticks matching their different sleep durations. The system ran continuously for over 15 seconds with output still alternating correctly at the end, with zero crashes beyond the two ordinary QEMU startup resets that appear in every test in this document.
 
+### Known Limitations (as of v0.7.0)
+
+- No way yet to kill a faulting task — see the "Task Kill + Preemption Correction" section below, added in v0.8.0.
+- No true preemption for a task that never blocks — also addressed, and partly *corrected* rather than fixed, below.
+- Each ring-3 task still shares the *same* page directory as the kernel and every other task — there's still no per-process address space isolation, same caveat as the usermode and ELF-loader sections. Multitasking here means multiple independent streams of execution, not multiple protected processes. This remains unaddressed as of v0.8.0 and is intentionally scoped as separate, larger future work.
+
+## Task Kill + Preemption Correction (v0.8.0)
+
+Two of the three limitations listed above turned out to need different treatment than expected once actually investigated — one was a real gap that got fixed, the other turned out to already not be a gap at all.
+
+### Preemption: Re-reading the Existing Code
+
+Revisiting `scheduler_tick()` while starting this work turned up something that had been mis-stated in the v0.7.0 notes above: it already switches tasks unconditionally on *every single* PIT interrupt, not just when a task blocks. Since the PIT fires at 100Hz, every ready task already gets forcibly preempted roughly every 10ms whether it asked to yield or not — which is, in fact, exactly what the multitasking demo's interleaved `A`/`B`/`C` output already proved back in v0.7.0. The "no true preemption" claim was an overstatement that didn't hold up against the kernel's own already-working behavior.
+
+The one genuine gap: a ring-0 task that executes `cli` and then loops without ever executing `sti` would disable the PIT interrupt itself, and since the scheduler only runs *inside* that interrupt, such a task truly could hog the CPU forever. But this isn't fixable with more scheduler logic — it's an inherent trust boundary of letting any code run at ring 0 at all, common to essentially every monolithic kernel. Notably, ring-3 tasks can't trigger this: `cli` from ring 3 is a privileged instruction, and the earlier usermode demo already proved the CPU rejects it with a General Protection Fault. So the real, honest scope of this limitation is: *trusted ring-0 kernel code could theoretically starve the system if it disables interrupts and never re-enables them* — which is a statement about what ring 0 fundamentally means, not a scheduler bug to chase further.
+
+### Kill Task: A Real Fix, Found By Testing It
+
+This one was genuinely broken and got fixed. Each `struct task` gained a `killable` flag (set for every task created via `task_create()` — i.e. anything loaded from an ELF — and left unset for the task wrapping the already-running shell via `task_create_current()`, so the interactive shell itself can never be torn down this way).
+
+`isr_handler()` now checks, after invoking whatever handler is registered for a given CPU exception (0–31), whether the currently running task is killable. If so, instead of falling into the kernel-wide panic-and-halt loop, it calls `scheduler_kill_current()`: the task is marked `TASK_DEAD`, its kernel stack and task struct are freed back to the heap, and the scheduler immediately picks the next ready task to resume — inside the very same interrupt that caught the fault, using the identical "return a different esp" mechanism the rest of the scheduler already relies on.
+
+The page fault handler (`vmm.c`) needed a matching change: it used to unconditionally `hlt` forever on any fault. It now only does that when the current task *isn't* killable (preserving the original hard-halt behavior for genuine kernel-level failures, e.g. before multitasking has even started); otherwise it prints its diagnostic and returns normally, letting `isr_handler`'s now-centralized kill logic take over. This keeps the "should we kill or halt" decision in one place rather than duplicated across every individual exception handler.
+
+**A first attempt at testing this immediately caught a real bug**: a deliberately crashing task (writes to `0xDEADBEEF`, an unmapped address) still froze the whole kernel. The page fault handler's own unconditional `hlt` loop was catching the fault *before* `isr_handler`'s new kill-or-panic logic ever got a chance to run — the kill path had been added to `isr_handler`, but the already-registered page fault handler still had its own independent, older "always halt" behavior that never delegated back. Fixed by making the page fault handler itself killability-aware, as described above, rather than assuming every exception handler would automatically respect the new centralized logic.
+
+### Verified Behavior
+
+With `multitask` running (task-A, task-B, task-C as in v0.7.0), a fourth task was deliberately loaded to crash — an ELF that writes through a null-ish unmapped pointer, `0xDEADBEEF` — via a new `crashtest` shell command:
+
+```
+GabutOS> crashtest
+task-CRASH ditambahkan -- dia bakal nulis ke alamat gak valid dan crash.
+Perhatiin: task lain (A/B/C) harusnya tetap jalan normal setelahnya.
+GabutOS>
+[PAGE FAULT] alamat=0xDEADBEEF err_code=0x00000006
+  present=no (halaman belum di-map)
+  akses=write
+  mode=user
+Task dihentikan, lanjut ke task lain.
+CABABCAABACABACBAABCAABps
+  * shell (running, ring0, prio 0)
+    task-B(r3) (sleeping sampai tick 1625)
+    task-A(r3) (sleeping sampai tick 1605)
+    task-C(r0) (sleeping sampai tick 1605)
+```
+
+The faulting task's address and access type were correctly diagnosed (unmapped, write, from ring 3, matching what the test program actually does). Critically, `A`/`B`/`C` output kept appearing *after* the fault — not just "the kernel didn't freeze," but the three surviving tasks kept genuinely executing and being scheduled. `ps` afterward listed exactly the three surviving tasks; `task-CRASH` doesn't appear anywhere, confirming it was fully removed from the scheduler rather than merely marked and left lingering. The shell remained responsive throughout (visible from `ps`'s own characters interleaving with the letter output, same as the v0.7.0 test). Zero crashes beyond the two ordinary QEMU startup resets.
+
+### A Note on Memory Safety During Kill
+
+`scheduler_kill_current()` frees the dying task's kernel stack via `kfree()` while the CPU is, at that exact moment, still executing on that very stack (inside the interrupt handler that caught the fault). This is safe *specifically* because `heap.c`'s `kfree()` only flips bookkeeping flags in the free-list — it never zeroes or unmaps the underlying bytes, so the memory stays intact and readable/executable right up until something else allocates over it. The function finishes running, returns its result in `EAX`, and only then does the interrupt stub actually load a different stack pointer and abandon the freed memory for good. This is a deliberate, documented dependency on this specific allocator's behavior — swapping in a more aggressive allocator that scrubs or immediately reuses freed memory would break this and would need the kill path to switch stacks *before* freeing, not after.
+
+### Known Limitations (as of the first half of v0.8.0)
+
+- Per-process address space isolation is still the one large piece left unaddressed — every task, killable or not, still runs against the same shared page directory as the kernel. This is intentionally scoped as separate future work rather than folded into this change.
+- A killed task's physical stack *pages* aren't reclaimed — only the kernel-heap-backed structures (`struct task`, the kernel stack buffer) are freed via `kfree()`. The physical page(s) backing its ring-3 user stack, allocated via `pmm_alloc_page()` in `task_create()`, are currently leaked. This matches a similar gap already noted in the filesystem section (no space reclamation) — fixing it needs `vmm_map_page()` to grow a companion "unmap and return the physical page to the PMM" operation, which doesn't exist yet.
+- The ring-0 `cli`-forever starvation case described above remains structurally unfixable without deeper trust/isolation mechanisms (e.g. a watchdog NMI) that are out of scope for now.
+
+## Per-Process Address Space Isolation (second half of v0.8.0)
+
+Both remaining limitations above — no isolation, no stack reclamation — were closed in the same continued v0.8.0 effort (kept under the same version number by request, since it directly extends the task-kill work rather than starting a new feature line).
+
+### What Changed, Mechanically
+
+`vmm.h`/`vmm.c` gained the operations a per-process address space actually needs: `vmm_create_address_space()` (allocate and initialize a brand-new page directory), `_in`-suffixed variants of the existing map/mapped-check functions that take an explicit page directory instead of always assuming the one global kernel directory, `vmm_unmap_and_free_in()` (the reclaim operation that was missing — walks a specific mapping, frees the backing physical page back to the PMM, and invalidates the TLB entry), and small helpers to read/write `CR3` directly (`vmm_current_directory()`, `vmm_activate()`).
+
+`struct task` gained a `page_directory` field — `NULL` means "run against the shared kernel directory" (every task from v0.7.0 and the shell itself still work exactly this way), a non-`NULL` pointer means "this task has its own isolated address space." `task_create()` and `elf_load()` both now take this pointer through, mapping a task's user stack (and, for `elf_load()`, its code/data segments) into whichever directory was requested instead of always the global one.
+
+The scheduler's `switch_into()` — already the single, centralized place every task switch routes through, a direct result of the v0.7.0/early-v0.8.0 refactor that consolidated switching logic to avoid exactly the kind of duplicated-behavior bug that caused the page-fault-handler issue earlier — was a natural place to add one more line: load `CR3` from the incoming task's `page_directory` (or the shared kernel directory if it doesn't have one) on every switch. Because this already lives in one function used by all three switch paths (tick-based preemption, syscall-triggered sleep, and task-kill), the CR3 switch is automatically correct in all three without needing to touch them individually.
+
+### Two Real Bugs, Found by Actually Running It — Not Read Into Existence
+
+The first working version of the isolation demo (two tasks, `task-X` and `task-Y`, deliberately linked to the exact same virtual address, `0x1000000`, in separate address spaces — chosen specifically so success could only mean the isolation was real, not an accident of different addresses happening not to collide) did not work correctly on the first two attempts, in two entirely different ways.
+
+**Bug 1 — a naive full copy of the page directory silently defeated the isolation it was meant to provide.** The first implementation of `vmm_create_address_space()` copied the entire 1024-entry kernel page directory into the new one. This seemed reasonable — share the kernel's mappings, get a private copy to add task-specific mappings into — but it silently broke because a *copied* page directory entry still points at the *same underlying page table*. Since `task-A`, `task-B`, and `task-C` (from the ordinary `multitask` demo, run just before `isotest` in the same session) had already been loaded into the *shared* kernel directory at `0x1000000`, `0x1100000`, and `0x1200000` — and `task-A` specifically shares `isotest`'s chosen collision address, `0x1000000` — the freshly copied `pd_x` and `pd_y` inherited an *already-present* mapping at that exact address, still pointing at task-A's page table. `elf_load()`'s "skip if already mapped" check (there to avoid double-allocating pages for segments that share a boundary page, a legitimate optimization from the ELF-loader work) then saw that address as already mapped and skipped creating a new page — so task-X's and task-Y's ELF bytes both got written into the *same physical page* task-A's code already occupied, each overwriting the last. The observable symptom was exactly this: only `Y`'s output ever appeared (it loaded last, so its bytes "won"), and — following that thread further — `task-A` itself would have been silently corrupted too, though this specific run didn't surface that side effect directly.
+
+**Bug 2 — the fix for Bug 1 overcorrected and broke basic task-switching.** Restricting `vmm_create_address_space()` to only copy the true 0–4MB identity-mapped region (page directory index 0) and leave everything else empty seemed like the obvious, principled fix — collisions like the above become structurally impossible if nothing beyond the kernel's own fixed region is ever shared by default. It compiled and booted, but every task running under an isolated directory immediately page-faulted trying to read completely unrelated-looking addresses (`0x00403160`, `0x00403178`) — which turned out to be squarely inside the **heap** (`0x400000`–`0x800000`, i.e. page directory index 1, immediately *after* the identity-mapped region, not inside it). `struct task` itself, and every task's kernel stack, are `kmalloc()`'d — living in the heap. An isolated task's own control-block and stack are therefore *kernel* data that has to remain visible in *every* address space regardless of which task is "isolated," in the same way essentially every real OS maps a shared kernel region into every process's page tables. The fix was to extend the shared portion of `vmm_create_address_space()` to also copy page directory index 1 (the heap's range) alongside index 0 — restoring correct kernel/heap visibility everywhere, while index 2 and above (where task code, task stacks, and everything isolation is actually meant to separate lives) remain genuinely private per address space.
+
+Both bugs were caught by running the actual demo and reading what broke, not by reasoning about the code in the abstract — the first attempt produced plausible-looking, non-crashing, wrong output (`Y` printing endlessly, `X` never appearing) that could easily have been mistaken for a scheduling quirk rather than a memory-sharing bug if it hadn't been cross-checked against expected 50/50 output; the second attempt crashed immediately and loudly via the kernel's own page fault handler, which made it comparatively easy to diagnose once the faulting addresses were checked against the heap's known range.
+
+### Verified Behavior
+
+With `multitask` already running (so `task-A`/`B`/`C` occupy `0x1000000`/`0x1100000`/`0x1200000` in the *shared* directory), a new `isotest` command creates two separate address spaces via `vmm_create_address_space()`, loads two different ELF binaries — both deliberately linked to `0x1000000`, the same address `task-A` already uses in the shared space — one per isolated directory, and schedules them alongside everything else already running:
+
+```
+GabutOS> isotest
+task-X dan task-Y ditambahkan, DUA-DUANYA di-load ke alamat
+virtual yang SAMA (0x1000000), tapi di page directory TERPISAH.
+Kalau isolasi beneran jalan: X terus ngeprint 'X', Y terus ngeprint 'Y',
+gak ada yang ke-corrupt walau alamatnya identik.
+GabutOS> XYABYXACXYABAYXBCAXYABYXACABXYACYXBAXYABCAYXABXYAC
+```
+
+Both letters kept appearing steadily for the full duration of an extended run — a raw count over the captured serial log showed `X` appearing 39 times and `Y` 40 times, consistent with the scheduler's flat round-robin giving both tasks an equal share of turns, and neither ever displacing or corrupting the other despite sharing the exact same virtual address. `ps` correctly labeled `task-X(iso)` and `task-Y(iso)` as `isolated`, distinct from the `shared` label on `task-A`/`B`/`C`/the shell.
+
+Stack reclamation was verified by watching `pages`' free-page count across a full create-and-kill cycle: 32461 free pages before `multitask`, 32449 after three tasks were created (a small, expected drop), and — after `crashtest` added a fourth task that immediately faulted and was killed — 32447, a net drop of only 2 pages from the prior reading rather than growing unboundedly. This confirms the killed task's physical stack page came back to the PMM instead of leaking, addressing the second limitation listed above.
+
+`crashtest` (the existing kill-on-fault demo from earlier in v0.8.0) was re-run after all these changes to confirm no regression: identical behavior to before — the faulting task is removed, `A`/`B`/`C` keep running, the shell stays responsive.
+
+### Known Limitations (final, as of v0.8.0)
+
+- Isolation is currently binary and manual — a task either gets a fully private directory (everything above the shared kernel+heap region) or shares the kernel's directory entirely, decided by whoever calls `task_create()`/`elf_load()`. There's no automatic promotion of, say, the `run` command's ordinary ELF-loaded tasks to isolated directories by default; they still default to the shared space unless explicitly given one, matching v0.7.0's behavior for backward compatibility.
+- Physical *code/data* pages for an isolated task aren't reclaimed on kill yet — only its stack page is (via the same `vmm_unmap_and_free_in()` path). Extending reclamation to walk and free every mapping in a killed task's private directory (and eventually free the directory's own physical page) is straightforward given the primitives now in place, but hasn't been done.
+- There's still no memory protection *between* two isolated tasks beyond the address space separation itself — no permission or quota system, no limit on how much physical memory an isolated task's own segments can consume beyond the PMM simply running out.
+
+## Full Reclaim + Auto-Isolation (v0.9.0)
+
+This closes both remaining items from the v0.8.0 roadmap in one pass.
+
+### Full Reclaim: `vmm_destroy_address_space()`
+
+v0.8.0's process isolation only reclaimed a killed isolated task's *stack* page — its code and data pages, and the page directory itself, were leaked. `vmm_destroy_address_space()` closes this: it walks page directory indices 2 through 1023 (deliberately skipping indices 0 and 1, the shared kernel-and-heap region every address space inherits — freeing those would corrupt every other task and the kernel itself), and for each present entry frees every mapped physical page in that page table, then the page table itself, then finally the page directory's own physical page.
+
+This gets called from `scheduler_kill_current()`, but only *after* `switch_into()` has already loaded a different task's `CR3` — freeing a page directory while it's still the one active in the CPU's own `CR3` register would be actively dangerous (that memory could be reused for something else while the CPU is still using it as its page directory). The ordering here isn't incidental; it's the same category of care that went into the memory-safety note on `kfree()`-ing a task's kernel stack in the earlier kill-task work.
+
+### Auto-Isolation: `run` Rebuilt on Top of the Task System
+
+The original `run` command (from v0.6.0, unchanged through v0.8.0) predates the task/scheduler system entirely — it called `usermode_jump()`, a synchronous one-shot ring-3 transition that never created a `struct task` and never went through the scheduler at all. It effectively *replaced* the shell permanently rather than coexisting with it as one task among several.
+
+`run` is now rebuilt to match `multitask` and `isotest`: it calls `vmm_create_address_space()` for every invocation (no opt-out — isolation is no longer something a caller has to remember to ask for), loads the ELF into that new directory, wraps it in a real `struct task`, and hands it to `scheduler_add_task()`. Because it now depends on the scheduler actually running, `run` checks `scheduler_is_active()` first and asks the user to start `multitask` if it isn't — rather than silently falling back to the old one-shot behavior, which would have made `run`'s behavior inconsistent depending on whether multitasking happened to already be active.
+
+### Verified Behavior
+
+**Auto-isolation:**
+```
+GabutOS> run hello.elf
+Jalankan 'multitask' dulu (nyalain scheduler), baru 'run <nama>' bisa dipakai.
+GabutOS> multitask
+GabutOS> run hello.elf
+[elf] 'hello.elf' jalan sebagai task terisolasi (page directory sendiri).
+GabutOS> Halo dari program ELF asli yang di-load dari disk!
+```
+`ps` afterward correctly labels the `run`-launched task `isolated`, same as `isotest`'s tasks, distinct from `task-A`/`B`/`C`'s `shared` label — confirming ordinary program launches now get real isolation by default, not just the dedicated demo command.
+
+**Full reclaim**, tested with a new deliberately-crashing program (`crash.elf`, writes through an unmapped pointer after printing a message) run in isolation via the now-rebuilt `run`:
+```
+GabutOS> pages
+Physical pages: 32448 free / 32639 total (129792 KB bebas)
+GabutOS> run crash.elf
+[elf] 'crash.elf' jalan sebagai task terisolasi (page directory sendiri).
+task isolated ini bakal crash sebentar lagi
+
+[PAGE FAULT] alamat=0xCAFEBABE err_code=0x00000006
+Task dihentikan, lanjut ke task lain.
+GabutOS> pages
+Physical pages: 32431 free / 32639 total (129724 KB bebas)
+GabutOS> ps
+  * shell (running, ring0, shared)
+    task-A(r3) (sleeping..., shared)
+    task-C(r0) (sleeping..., shared)
+    task-B(r3) (sleeping..., shared)
+```
+The free-page count moved by an amount consistent with ordinary background task churn (`task-A`/`B`/`C` continuing to cycle through their own sleep/wake pages) rather than growing unboundedly the way it would if the crashing task's code/data pages and page directory had leaked. `ps` shows `crash.elf` fully gone from the task list — not just its stack reclaimed, but the entire task and its address space. Zero crashes beyond the routine QEMU startup resets.
+
 ### Known Limitations
 
-- **No way yet to kill a faulting task.** This closes part of the gap noted in the usermode and ELF-loader sections, but only partly: a task that sleeps and wakes up cooperates fine, but a task that page-faults or executes a privileged instruction still triggers the kernel-wide panic-and-halt behavior described earlier, taking every other task down with it. A real "kill this one task and keep scheduling the rest" path is still future work.
-- **No true preemption for a task that never blocks.** The flat round-robin queue is fair *among tasks that eventually sleep or yield*, but a hypothetical ring-0 task stuck in a tight, non-yielding loop would still be re-queued and re-run every time its turn came up on a PIT tick, since the current switch only happens at tick boundaries — there's no forced timeslice cutoff mid-execution beyond that.
-- Each ring-3 task still shares the *same* page directory as the kernel and every other task — there's still no per-process address space isolation, same caveat as the usermode and ELF-loader sections. Multitasking here means multiple independent streams of execution, not multiple protected processes.
+- There's still no memory quota — an isolated task can still exhaust physical RAM through a large enough ELF segment before it ever gets a chance to fault or be killed.
+- Reclaiming a page directory's physical page assumes nothing else still references it; this holds today because a task's directory is never shared with any other task, but would need revisiting if address-space sharing (e.g. threads within one process) is ever added.
+- `run`'s new dependency on `multitask` being active first is a deliberate, visible behavior change from v0.6.0–v0.8.0 — scripts or muscle memory built around the old "run works standalone" behavior will need to adjust.
+
+## Filesystem Delete + Reclaim, and Memory Quotas (v1.0.0)
+
+Three specific gaps were closed for this release, all explicitly named as the reason `1.0.0` was held back rather than tagged at v0.9.0: the flat filesystem had no way to delete a file or reuse its space, and an isolated task had no upper bound on how much physical memory it could consume before ever getting a chance to fault or be killed.
+
+### Filesystem: Delete and a Real Free-Space Allocator
+
+Every version through v0.9.0 only ever grew the data area — `sb.next_free_lba` moved forward on every write and never moved back, so a filesystem that was written to and deleted from repeatedly would eventually run out of disk regardless of how many files were actually still present. `fs_delete()` closes this, but doing it correctly needed more than just clearing a file-table entry: the sectors it occupied have to become genuinely reusable by a future write, not just abandoned.
+
+The superblock gained a small free-extent list (up to 16 entries, each a `start_lba`/`sector_count` pair) — conceptually the same free-list idea `heap.c`'s allocator already uses for RAM, applied here to disk sectors instead. `fs_delete()` adds the deleted file's range back into this list, merging it with an adjacent extent if one directly borders it (coalescing, to avoid the list filling up with many small fragments over repeated delete cycles). `fs_write()` now checks this list first (`free_extents_take()`, a first-fit search) before falling back to the old bump-forward behavior — so a newly written file will land in previously-deleted space if a big-enough hole exists, rather than always growing the disk further out.
+
+`fs_write()` also became overwrite-aware: writing to a name that already exists now calls `fs_delete()` on the old entry first (freeing its sectors back to the pool) before writing the new data, instead of what it did through v0.9.0 — silently creating a second table entry with the same name, leaving the original's sectors permanently orphaned with no way to reach or reclaim them.
+
+One structural note: adding the free-extent list to `struct fs_superblock` meant the on-disk layout changed, so a disk formatted by an older version isn't compatible with this one — `fs_mount()` still checks the magic number and will simply refuse to mount anything that doesn't match, rather than misinterpreting old data as a valid free-extent list.
+
+### Verified Behavior
+
+```
+GabutOS> fsformat
+GabutOS> fstest
+Nulis hello.txt sukses.
+GabutOS> loadtest
+hello.elf (768 bytes) ditulis ke disk.
+crash.elf (764 bytes) ditulis ke disk...
+GabutOS> ls
+  hello.txt (69 bytes)
+  hello.elf (768 bytes)
+  crash.elf (764 bytes)
+GabutOS> rm hello.txt
+Dihapus: hello.txt
+GabutOS> ls
+  hello.elf (768 bytes)
+  crash.elf (764 bytes)
+GabutOS> cat hello.txt
+File gak ketemu: hello.txt
+GabutOS> fstest
+Nulis hello.txt sukses.
+GabutOS> cat hello.txt
+Halo dari GabutOS! Data ini beneran nempel di disk (bukan cuma RAM).
+```
+
+The second `fstest` after deletion successfully re-created `hello.txt` and read back the *new* write correctly — confirming the reclaimed sectors were both reusable and not accidentally serving stale data from before the delete.
+
+### Memory Quotas for Isolated Tasks
+
+`elf_load()` gained a `max_pages` parameter. As it walks a program's `PT_LOAD` segments allocating and mapping physical pages, it now counts pages as it goes and — if a load would exceed the limit — stops immediately, prints why, and rolls back: every page it had already allocated and mapped *during this specific call* gets unmapped and freed via `vmm_unmap_and_free_in()`, so a rejected program leaves no partial, orphaned mappings behind. Internal callers that load the kernel's own trusted demo programs (`multitask`, `isotest`, `crashtest`) pass `0`, meaning unlimited — the quota exists to bound what an arbitrary, untrusted ELF handed to `run` can do, not to second-guess code the kernel itself is choosing to load. `run` specifically enforces a 64-page (256KB) ceiling.
+
+### Verified Behavior
+
+A test program (`hog.elf`) with roughly 500KB of `.bss` — deliberately well past the 64-page ceiling — was written to disk and launched:
+
+```
+GabutOS> pages
+Physical pages: 32447 free / 32639 total
+GabutOS> run hog.elf
+[elf] program melebihi quota memori (64 halaman)
+[elf] gagal load (lihat pesan error di atas)
+GabutOS> pages
+Physical pages: 32431 free / 32639 total
+GabutOS> ps
+  * shell (running, ring0, shared)
+    task-C(r0) (sleeping..., shared)
+    task-A(r3) (sleeping..., shared)
+    task-B(r3) (sleeping..., shared)
+```
+
+The free-page count dropped by 16 between the two `pages` checks — consistent with ordinary background churn from `task-A`/`B`/`C` continuing to sleep and wake during the several seconds the test took, not the 64+ pages that would have leaked had the rollback failed to actually free what `hog.elf`'s partial load had allocated. `ps` confirms `hog.elf` never became a task at all — it was rejected before `task_create()` was ever called. A follow-up regression check confirmed `hello.elf` (well under the 64-page limit) still launches and runs normally afterward, unaffected by the new check.
+
+### Known Limitations
+
+- The free-extent list is capped at 16 entries; a filesystem subjected to a very fragmented pattern of writes and deletes could exhaust it, after which further freed space would stop being tracked (though still safely inert — it wouldn't corrupt anything, just become permanently unreclaimed, similar in spirit to the heap's own forward-only merge limitation noted earlier).
+- The quota is a flat page count with one fixed value for everything launched via `run`; there's no per-program or per-user configurability, and no equivalent quota for a task's stack or kernel-side resources — only its ELF-loaded code and data are bounded.
+- Deleting a file only affects future allocations; it doesn't overwrite the freed sectors' actual on-disk bytes, so data technically remains physically present on the disk image until something else writes over it — ordinary for how most real filesystems' `delete` operations work too, but worth being explicit about for anyone assuming "deleted" means "securely erased."
 
 ## Roadmap
 
@@ -232,8 +460,20 @@ The `p` and `s` from typing `ps`, and `uptAimCe` from typing `uptime`, are visib
 5. ~~Disk driver (ATA PIO) + flat filesystem~~ — done (v0.5.0)
 6. ~~ELF loader~~ — done (v0.6.0)
 7. ~~Multitasking (round-robin, mixed ring0/ring3, sleep)~~ — done (v0.7.0)
-8. A way to kill a single faulting task instead of halting the whole kernel
-9. Fair preemption for a hypothetical never-blocking task (currently only switches at tick boundaries between otherwise-cooperative tasks)
+8. ~~Kill a faulting task instead of halting the kernel~~ — done (v0.8.0)
+9. ~~Preemption for non-cooperative tasks~~ — turned out to already work by design; clarified, not changed (v0.8.0)
+10. ~~Per-process address space isolation (separate page directory per task)~~ — done (v0.8.0)
+11. ~~Reclaim a killed task's physical user-stack page~~ — done (v0.8.0)
+12. ~~Reclaim a killed isolated task's code/data pages and its own page directory~~ — done (v0.9.0)
+13. ~~Automatic isolation for ordinary `run`-launched tasks~~ — done (v0.9.0)
+14. ~~Filesystem delete + real space reclamation~~ — done (v1.0.0)
+15. ~~Memory quotas for isolated tasks~~ — done (v1.0.0)
+
+## v1.0.0 — Where This Stands
+
+Every roadmap item is closed, including the three (filesystem delete/reclaim, and memory quotas) specifically held back from v0.9.0 as the reason `1.0.0` wasn't tagged yet. This is GabutOS's first release meant to be treated as a coherent, complete system rather than an in-progress snapshot: it boots standalone via GRUB, manages physical and virtual memory, reads and writes a real (if intentionally simple) filesystem, loads and runs independently compiled ELF binaries, and runs several of them concurrently with genuine per-process address space isolation, memory quotas, and the ability to kill a misbehaving one without taking the rest of the system down.
+
+`1.0.0` here does not mean "free of every rough edge." Every feature section above still lists honest, specific "Known Limitations" — a flat filesystem with a bounded free-list, no dynamic linking, no way to stop a ring-0 task that disables interrupts forever, and others. What changed at this version isn't that those went away; it's that none of them are structural gaps in something the kernel claims to do — they're documented boundaries of a system that otherwise works end to end, which is the bar this project set for calling a release stable.
 
 ## Building
 

@@ -23,7 +23,26 @@ uint32_t isr_handler(struct registers* regs) {
         if (regs->int_no == 128) {
             return scheduler_maybe_switch((uint32_t)regs);
         }
+
+        if (regs->int_no < 32 && scheduler_current_is_killable()) {
+            return scheduler_kill_current((uint32_t)regs);
+        }
+
         return (uint32_t)regs;
+    }
+
+    if (scheduler_current_is_killable()) {
+        print_string("\n[TASK KILLED] Exception: ");
+        if (regs->int_no < 32) {
+            print_string(exception_messages[regs->int_no]);
+        } else {
+            print_hex(regs->int_no);
+        }
+        print_string("  err_code=");
+        print_hex(regs->err_code);
+        print_string("\nTask dihentikan, lanjut ke task lain.\n");
+
+        return scheduler_kill_current((uint32_t)regs);
     }
 
     print_string("\n[PANIC] Exception: ");

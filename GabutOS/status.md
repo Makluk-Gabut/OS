@@ -62,8 +62,23 @@ Roadmap berikutnya, urut prioritas:
 5. ~~Driver disk (ATA PIO) + filesystem flat sederhana~~ ✅ selesai (v0.5.0)
 6. ~~ELF loader~~ ✅ selesai (v0.6.0)
 7. ~~Multitasking (round-robin, ring0+ring3 campur, sleep)~~ ✅ selesai (v0.7.0)
-8. Cara "bunuh" task yang crash tanpa halt seluruh kernel (masih gap dari v0.4.0/v0.6.0)
-9. Preemption adil buat task yang gak pernah blocking (starvation risk kalau ada task ring0 CPU-bound)
+8. ~~Cara "bunuh" task yang crash tanpa halt seluruh kernel~~ ✅ selesai (v0.8.0)
+9. ~~Preemption adil~~ — ternyata udah otomatis ada dari desain scheduler_tick (switch tiap PIT tick ~10ms), diklarifikasi di v0.8.0. Satu-satunya celah nyata: task ring0 yang cli+infinite-loop (inherent trust boundary, bukan bug scheduler).
+10. ~~Isolasi proses beneran — page directory terpisah per task~~ ✅ selesai (v0.8.0)
+11. ~~Reclaim physical stack page task yang di-kill~~ ✅ selesai (v0.8.0)
+12. ~~Reclaim code/data page + page directory milik task isolated yang di-kill~~ ✅ selesai (v0.9.0)
+13. ~~Isolasi otomatis buat task hasil command `run` biasa~~ ✅ selesai (v0.9.0)
+14. ~~Filesystem delete + reclaim ruang disk beneran~~ ✅ selesai (v1.0.0)
+15. ~~Memory quota per-task~~ ✅ selesai (v1.0.0)
+
+**GabutOS v1.0.0 — rilis stabil pertama.** Semua item roadmap awal tuntas, termasuk tiga gap yang sengaja ditahan dari v0.9.0. Sisa keterbatasan didokumentasikan jujur di README per bagian fitur, bukan lagi dianggap "belum selesai".
+
+### Roadmap Selanjutnya (post-1.0.0)
+Target besar berikutnya: **self-hosted C compiler + shell interaktif yang lebih dari sekadar command tetap**, biar orang beneran bisa nulis dan compile program *di dalam* GabutOS sendiri — bukan cuma jalanin ELF yang dikompilasi di luar. Ini lompatan besar (compiler C itu proyek sendiri yang berat), kemungkinan dipecah jadi:
+1. Shell yang lebih powerful — script sederhana, variabel, pipe antar command
+2. Text editor minimal (buat nulis kode di dalam GabutOS)
+3. Compiler C subset kecil dulu (bukan C penuh — mungkin cuma cukup buat compile ulang beberapa demo program sendiri)
+4. Assembler + linker minimal biar compiler bisa hasilkan ELF yang langsung jalan lewat loader yang udah ada
 
 Kalau lu juga lagi gabut dan suka ngoprek low-level, silakan fork & ikut gabut bareng 😂
 

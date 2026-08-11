@@ -2,6 +2,8 @@
 #include "tss.h"
 #include "pit.h"
 #include "screen.h"
+#include "heap.h"
+#include "vmm.h"
 
 static struct task* ready_head;
 static struct task* ready_tail;
@@ -46,6 +48,21 @@ static void wake_sleepers(uint32_t now_tick) {
     }
 }
 
+static void switch_into(struct task* next) {
+    next->state = TASK_RUNNING;
+    current_task = next;
+
+    if (next->ring == 3) {
+        tss_set_kernel_stack(next->kstack_top);
+    }
+
+    if (next->page_directory) {
+        vmm_activate(next->page_directory);
+    } else {
+        vmm_activate(vmm_kernel_directory());
+    }
+}
+
 void scheduler_init(void) {
     ready_head = NULL;
     ready_tail = NULL;
@@ -61,6 +78,7 @@ void scheduler_add_task(struct task* t) {
 void scheduler_start(struct task* initial_task) {
     current_task = initial_task;
     current_task->state = TASK_RUNNING;
+    current_task->run_start_tick = pit_get_ticks();
     active = 1;
 }
 
@@ -84,13 +102,7 @@ uint32_t scheduler_tick(uint32_t current_esp) {
         return current_esp;
     }
 
-    next->state = TASK_RUNNING;
-    current_task = next;
-
-    if (next->ring == 3) {
-        tss_set_kernel_stack(next->kstack_top);
-    }
-
+    switch_into(next);
     return next->esp;
 }
 
@@ -120,12 +132,46 @@ uint32_t scheduler_maybe_switch(uint32_t current_esp) {
         return current_esp;
     }
 
-    next->state = TASK_RUNNING;
-    current_task = next;
+    switch_into(next);
+    return next->esp;
+}
 
-    if (next->ring == 3) {
-        tss_set_kernel_stack(next->kstack_top);
+int scheduler_current_is_killable(void) {
+    if (!active || !current_task) return 0;
+    return current_task->killable;
+}
+
+uint32_t scheduler_kill_current(uint32_t current_esp) {
+    (void)current_esp;
+
+    if (!active || !current_task) return current_esp;
+
+    struct task* dead = current_task;
+    dead->state = TASK_DEAD;
+
+    if (dead->ring == 3 && dead->user_stack_phys != 0 && !dead->page_directory) {
+        vmm_unmap_and_free_in(vmm_kernel_directory(), dead->user_stack_vaddr);
     }
+
+    if (dead->kstack_top != 0) {
+        kfree((void*)(dead->kstack_top - TASK_KSTACK_SIZE));
+    }
+
+    struct task* next = dequeue_ready();
+    if (!next) {
+        print_string("[scheduler] semua task lain juga habis, gak ada yang bisa dilanjutin.\n");
+        for (;;) {
+            asm volatile ("cli; hlt");
+        }
+    }
+
+    switch_into(next);
+
+    if (dead->page_directory) {
+        vmm_destroy_address_space(dead->page_directory);
+    }
+
+    kfree(dead);
 
     return next->esp;
 }
@@ -136,8 +182,7 @@ void scheduler_list(void) {
         print_string(current_task->name);
         print_string(" (running, ring");
         print_dec((uint32_t)current_task->ring);
-        print_string(", prio ");
-        print_dec((uint32_t)current_task->priority);
+        print_string(current_task->page_directory ? ", isolated" : ", shared");
         print_string(")\n");
     }
 
@@ -147,8 +192,7 @@ void scheduler_list(void) {
         print_string(t->name);
         print_string(" (ready, ring");
         print_dec((uint32_t)t->ring);
-        print_string(", prio ");
-        print_dec((uint32_t)t->priority);
+        print_string(t->page_directory ? ", isolated" : ", shared");
         print_string(")\n");
         t = t->next;
     }
@@ -159,7 +203,7 @@ void scheduler_list(void) {
         print_string(s->name);
         print_string(" (sleeping sampai tick ");
         print_dec(s->wake_tick);
-        print_string(")\n");
+        print_string(s->page_directory ? ", isolated)\n" : ", shared)\n");
         s = s->next;
     }
 }

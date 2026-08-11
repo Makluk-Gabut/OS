@@ -13,6 +13,7 @@
 #define PT_LOAD 1
 
 #define ELF_MIN_LOAD_VADDR 0x1000000u
+#define ELF_MAX_TRACKED_PAGES 256
 
 struct elf32_ehdr {
     uint8_t e_ident[16];
@@ -42,7 +43,7 @@ struct elf32_phdr {
     uint32_t p_align;
 } __attribute__((packed));
 
-int elf_load(const uint8_t* data, uint32_t size, uint32_t* out_entry, int ring) {
+int elf_load(const uint8_t* data, uint32_t size, uint32_t* out_entry, int ring, uint32_t* page_directory, uint32_t max_pages) {
     if (size < sizeof(struct elf32_ehdr)) {
         print_string("[elf] file terlalu kecil buat jadi ELF valid\n");
         return 0;
@@ -71,6 +72,17 @@ int elf_load(const uint8_t* data, uint32_t size, uint32_t* out_entry, int ring) 
         return 0;
     }
 
+    uint32_t* target_pd = page_directory ? page_directory : vmm_kernel_directory();
+
+    asm volatile ("cli");
+    uint32_t* original_cr3 = vmm_current_directory();
+    int switched = (target_pd != original_cr3);
+    if (switched) vmm_activate(target_pd);
+
+    int ok = 1;
+    uint32_t pages_allocated = 0;
+    uint32_t allocated_vaddrs[ELF_MAX_TRACKED_PAGES];
+
     for (uint16_t i = 0; i < eh->e_phnum; i++) {
         const struct elf32_phdr* ph = (const struct elf32_phdr*)
             (data + eh->e_phoff + i * eh->e_phentsize);
@@ -79,12 +91,14 @@ int elf_load(const uint8_t* data, uint32_t size, uint32_t* out_entry, int ring) 
 
         if (ph->p_vaddr < ELF_MIN_LOAD_VADDR) {
             print_string("[elf] segmen minta alamat di bawah batas aman (bentrok area kernel/heap)\n");
-            return 0;
+            ok = 0;
+            break;
         }
 
         if (ph->p_offset + ph->p_filesz > size) {
             print_string("[elf] segmen file offset di luar batas file\n");
-            return 0;
+            ok = 0;
+            break;
         }
 
         uint32_t seg_start = ph->p_vaddr & 0xFFFFF000;
@@ -92,18 +106,34 @@ int elf_load(const uint8_t* data, uint32_t size, uint32_t* out_entry, int ring) 
         uint32_t page_flags = PAGE_PRESENT | PAGE_RW | (ring == 3 ? PAGE_USER : 0);
 
         for (uint32_t page_addr = seg_start; page_addr < seg_end; page_addr += 4096) {
-            if (vmm_is_mapped(page_addr)) continue;
+            if (vmm_is_mapped_in(target_pd, page_addr)) continue;
+
+            if (max_pages != 0 && pages_allocated >= max_pages) {
+                print_string("[elf] program melebihi quota memori (");
+                print_dec(max_pages);
+                print_string(" halaman)\n");
+                ok = 0;
+                break;
+            }
 
             uint32_t phys = pmm_alloc_page();
             if (phys == 0) {
                 print_string("[elf] kehabisan RAM fisik pas load segmen\n");
-                return 0;
+                ok = 0;
+                break;
             }
-            if (!vmm_map_page(page_addr, phys, page_flags)) {
+            if (!vmm_map_page_in(target_pd, page_addr, phys, page_flags)) {
                 print_string("[elf] gagal map halaman segmen\n");
-                return 0;
+                ok = 0;
+                break;
             }
+
+            if (pages_allocated < ELF_MAX_TRACKED_PAGES) {
+                allocated_vaddrs[pages_allocated] = page_addr;
+            }
+            pages_allocated++;
         }
+        if (!ok) break;
 
         uint8_t* dest = (uint8_t*)ph->p_vaddr;
         const uint8_t* src = data + ph->p_offset;
@@ -111,6 +141,17 @@ int elf_load(const uint8_t* data, uint32_t size, uint32_t* out_entry, int ring) 
         for (uint32_t k = ph->p_filesz; k < ph->p_memsz; k++) dest[k] = 0;
     }
 
-    *out_entry = eh->e_entry;
-    return 1;
+    if (ok) {
+        *out_entry = eh->e_entry;
+    } else {
+        uint32_t undo_count = pages_allocated < ELF_MAX_TRACKED_PAGES ? pages_allocated : ELF_MAX_TRACKED_PAGES;
+        for (uint32_t k = 0; k < undo_count; k++) {
+            vmm_unmap_and_free_in(target_pd, allocated_vaddrs[k]);
+        }
+    }
+
+    if (switched) vmm_activate(original_cr3);
+    asm volatile ("sti");
+
+    return ok;
 }

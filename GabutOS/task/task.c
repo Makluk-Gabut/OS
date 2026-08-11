@@ -30,7 +30,7 @@ static void set_name(struct task* t, const char* name) {
     t->name[i] = '\0';
 }
 
-struct task* task_create(const char* name, uint32_t entry, int ring, int priority) {
+struct task* task_create(const char* name, uint32_t entry, int ring, int priority, uint32_t* page_directory) {
     struct task* t = (struct task*)kmalloc(sizeof(struct task));
     if (!t) return NULL;
 
@@ -38,6 +38,9 @@ struct task* task_create(const char* name, uint32_t entry, int ring, int priorit
     if (!kstack) return NULL;
     uint32_t kstack_top = (uint32_t)kstack + TASK_KSTACK_SIZE;
     t->kstack_top = kstack_top;
+    t->page_directory = page_directory;
+    t->user_stack_vaddr = 0;
+    t->user_stack_phys = 0;
 
     if (ring == 3) {
         uint32_t stack_phys = pmm_alloc_page();
@@ -46,9 +49,14 @@ struct task* task_create(const char* name, uint32_t entry, int ring, int priorit
         uint32_t user_stack_vaddr = next_user_stack_vaddr;
         next_user_stack_vaddr += 4096;
 
-        if (!vmm_map_page(user_stack_vaddr, stack_phys, PAGE_PRESENT | PAGE_RW | PAGE_USER)) {
+        uint32_t* target_pd = page_directory ? page_directory : vmm_kernel_directory();
+
+        if (!vmm_map_page_in(target_pd, user_stack_vaddr, stack_phys, PAGE_PRESENT | PAGE_RW | PAGE_USER)) {
             return NULL;
         }
+
+        t->user_stack_vaddr = user_stack_vaddr;
+        t->user_stack_phys = stack_phys;
 
         struct frame_ring3* frame =
             (struct frame_ring3*)(kstack_top - sizeof(struct frame_ring3));
@@ -85,6 +93,8 @@ struct task* task_create(const char* name, uint32_t entry, int ring, int priorit
     t->state = TASK_READY;
     t->priority = priority;
     t->wake_tick = 0;
+    t->killable = 1;
+    t->run_start_tick = 0;
     t->next = NULL;
     set_name(t, name);
 
@@ -101,6 +111,11 @@ struct task* task_create_current(const char* name, int priority) {
     t->state = TASK_RUNNING;
     t->priority = priority;
     t->wake_tick = 0;
+    t->killable = 0;
+    t->run_start_tick = 0;
+    t->page_directory = NULL;
+    t->user_stack_vaddr = 0;
+    t->user_stack_phys = 0;
     t->next = NULL;
     set_name(t, name);
 

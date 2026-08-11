@@ -20,8 +20,15 @@
 #include "demo_task_a.h"
 #include "demo_task_b.h"
 #include "demo_task_c.h"
+#include "demo_task_crash.h"
+#include "demo_iso_x.h"
+#include "demo_iso_y.h"
+#include "demo_crash_iso.h"
+#include "demo_hog.h"
 #include "task.h"
 #include "scheduler.h"
+
+#define RUN_TASK_MAX_PAGES 64
 
 extern uint32_t stack_top;
 
@@ -47,7 +54,51 @@ static int starts_with(const char* str, const char* prefix) {
 
 static void execute_command(char* cmd) {
     if (strcmp(cmd, "help") == 0) {
-        print_string("Available commands: help, clear, mem, uptime, pages, alloctest, usermode, fsformat, ls, cat <nama>, fstest, loadtest, run <nama>, multitask, ps\n");
+        print_string("Available commands: help, clear, mem, uptime, pages, alloctest, usermode, fsformat, ls, cat <nama>, rm <nama>, fstest, loadtest, run <nama>, multitask, ps, crashtest, isotest\n");
+    } else if (strcmp(cmd, "isotest") == 0) {
+        if (!scheduler_is_active()) {
+            print_string("Jalankan 'multitask' dulu buat nyalain scheduler-nya.\n");
+        } else {
+            uint32_t* pd_x = vmm_create_address_space();
+            uint32_t* pd_y = vmm_create_address_space();
+
+            if (!pd_x || !pd_y) {
+                print_string("Gagal bikin address space baru (kehabisan RAM fisik?)\n");
+            } else {
+                uint32_t entry_x, entry_y;
+                int ok_x = elf_load(demo_iso_x_elf, demo_iso_x_elf_size, &entry_x, 3, pd_x, 0);
+                int ok_y = elf_load(demo_iso_y_elf, demo_iso_y_elf_size, &entry_y, 3, pd_y, 0);
+
+                if (ok_x && ok_y) {
+                    struct task* task_x = task_create("task-X(iso)", entry_x, 3, 1, pd_x);
+                    struct task* task_y = task_create("task-Y(iso)", entry_y, 3, 1, pd_y);
+
+                    if (!task_x || !task_y) {
+                        print_string("Gagal bikin task (kehabisan heap?)\n");
+                    } else {
+                        scheduler_add_task(task_x);
+                        scheduler_add_task(task_y);
+
+                        print_string("task-X dan task-Y ditambahkan, DUA-DUANYA di-load ke alamat\n");
+                        print_string("virtual yang SAMA (0x1000000), tapi di page directory TERPISAH.\n");
+                        print_string("Kalau isolasi beneran jalan: X terus ngeprint 'X', Y terus ngeprint 'Y',\n");
+                        print_string("gak ada yang ke-corrupt walau alamatnya identik.\n");
+                    }
+                }
+            }
+        }
+    } else if (strcmp(cmd, "crashtest") == 0) {
+        if (!scheduler_is_active()) {
+            print_string("Jalankan 'multitask' dulu, baru 'crashtest' buat lihat task lain tetap hidup.\n");
+        } else {
+            uint32_t entry_crash;
+            if (elf_load(demo_task_crash_elf, demo_task_crash_elf_size, &entry_crash, 3, NULL, 0)) {
+                struct task* bad_task = task_create("task-CRASH(r3)", entry_crash, 3, 1, NULL);
+                scheduler_add_task(bad_task);
+                print_string("task-CRASH ditambahkan -- dia bakal nulis ke alamat gak valid dan crash.\n");
+                print_string("Perhatiin: task lain (A/B/C) harusnya tetap jalan normal setelahnya.\n");
+            }
+        }
     } else if (strcmp(cmd, "multitask") == 0) {
         if (scheduler_is_active()) {
             print_string("Scheduler udah jalan. Reboot buat coba dari awal.\n");
@@ -57,13 +108,13 @@ static void execute_command(char* cmd) {
             struct task* shell_task = task_create_current("shell", 0);
 
             uint32_t entry_a, entry_b, entry_c;
-            elf_load(demo_task_a_elf, demo_task_a_elf_size, &entry_a, 3);
-            elf_load(demo_task_b_elf, demo_task_b_elf_size, &entry_b, 3);
-            elf_load(demo_task_c_elf, demo_task_c_elf_size, &entry_c, 0);
+            elf_load(demo_task_a_elf, demo_task_a_elf_size, &entry_a, 3, NULL, 0);
+            elf_load(demo_task_b_elf, demo_task_b_elf_size, &entry_b, 3, NULL, 0);
+            elf_load(demo_task_c_elf, demo_task_c_elf_size, &entry_c, 0, NULL, 0);
 
-            struct task* task_a = task_create("task-A(r3)", entry_a, 3, 1);
-            struct task* task_b = task_create("task-B(r3)", entry_b, 3, 2);
-            struct task* task_c = task_create("task-C(r0)", entry_c, 0, 1);
+            struct task* task_a = task_create("task-A(r3)", entry_a, 3, 1, NULL);
+            struct task* task_b = task_create("task-B(r3)", entry_b, 3, 2, NULL);
+            struct task* task_c = task_create("task-C(r0)", entry_c, 0, 1, NULL);
 
             scheduler_add_task(task_a);
             scheduler_add_task(task_b);
@@ -89,32 +140,63 @@ static void execute_command(char* cmd) {
         } else {
             print_string("Gagal nulis (tabel file penuh atau belum di-format?)\n");
         }
+        if (fs_write("crash.elf", demo_crash_iso_elf, demo_crash_iso_elf_size)) {
+            print_string("crash.elf (");
+            print_dec(demo_crash_iso_elf_size);
+            print_string(" bytes) ditulis ke disk -- coba 'run crash.elf' buat lihat reclaim jalan.\n");
+        }
+        if (fs_write("hog.elf", demo_hog_elf, demo_hog_elf_size)) {
+            print_string("hog.elf (");
+            print_dec(demo_hog_elf_size);
+            print_string(" bytes) ditulis ke disk -- coba 'run hog.elf' buat lihat quota nolak dia.\n");
+        }
     } else if (starts_with(cmd, "run ")) {
         const char* filename = cmd + 4;
-        uint32_t buf_cap = 65536;
-        uint8_t* buf = (uint8_t*)kmalloc(buf_cap);
-        if (!buf) {
-            print_string("Gagal alokasi buffer buat load file.\n");
+
+        if (!scheduler_is_active()) {
+            print_string("Jalankan 'multitask' dulu (nyalain scheduler), baru 'run <nama>' bisa dipakai.\n");
         } else {
-            uint32_t size;
-            if (!fs_read(filename, buf, buf_cap, &size)) {
-                print_string("File gak ketemu: ");
-                print_string(filename);
-                print_string("\n");
-                kfree(buf);
+            uint32_t buf_cap = 65536;
+            uint8_t* buf = (uint8_t*)kmalloc(buf_cap);
+            if (!buf) {
+                print_string("Gagal alokasi buffer buat load file.\n");
             } else {
-                if (size > buf_cap) {
-                    print_string("[warn] file lebih besar dari buffer loader (64KB), kepotong.\n");
-                    size = buf_cap;
-                }
-                uint32_t entry;
-                if (elf_load(buf, size, &entry, 3)) {
-                    print_string("[elf] load sukses, lompat ke entry point...\n");
-                    usermode_jump(entry);
+                uint32_t size;
+                if (!fs_read(filename, buf, buf_cap, &size)) {
+                    print_string("File gak ketemu: ");
+                    print_string(filename);
+                    print_string("\n");
+                    kfree(buf);
                 } else {
-                    print_string("[elf] gagal load (lihat pesan error di atas)\n");
+                    if (size > buf_cap) {
+                        print_string("[warn] file lebih besar dari buffer loader (64KB), kepotong.\n");
+                        size = buf_cap;
+                    }
+
+                    uint32_t* pd = vmm_create_address_space();
+                    if (!pd) {
+                        print_string("Gagal bikin address space (kehabisan RAM fisik?)\n");
+                        kfree(buf);
+                    } else {
+                        uint32_t entry;
+                        if (!elf_load(buf, size, &entry, 3, pd, RUN_TASK_MAX_PAGES)) {
+                            print_string("[elf] gagal load (lihat pesan error di atas)\n");
+                            vmm_destroy_address_space(pd);
+                        } else {
+                            struct task* t = task_create(filename, entry, 3, 1, pd);
+                            if (!t) {
+                                print_string("Gagal bikin task (kehabisan heap?)\n");
+                                vmm_destroy_address_space(pd);
+                            } else {
+                                scheduler_add_task(t);
+                                print_string("[elf] '");
+                                print_string(filename);
+                                print_string("' jalan sebagai task terisolasi (page directory sendiri).\n");
+                            }
+                        }
+                        kfree(buf);
+                    }
                 }
-                kfree(buf);
             }
         }
     } else if (strcmp(cmd, "fsformat") == 0) {
@@ -130,6 +212,17 @@ static void execute_command(char* cmd) {
             uint32_t to_print = size < sizeof(buf) - 1 ? size : sizeof(buf) - 1;
             buf[to_print] = '\0';
             print_string((char*)buf);
+            print_string("\n");
+        } else {
+            print_string("File gak ketemu: ");
+            print_string(filename);
+            print_string("\n");
+        }
+    } else if (starts_with(cmd, "rm ")) {
+        const char* filename = cmd + 3;
+        if (fs_delete(filename)) {
+            print_string("Dihapus: ");
+            print_string(filename);
             print_string("\n");
         } else {
             print_string("File gak ketemu: ");
@@ -243,7 +336,7 @@ void kernel_main(uint32_t magic, uint32_t mb_info_addr) {
     serial_write("=== GabutOS booting ===\n");
 
     clear_screen();
-    print_string("GabutOS v0.7.0 - Multitasking\n");
+    print_string("GabutOS v1.0.0 - First Stable Release\n");
     print_string("=========================================\n");
 
     gdt_install();
