@@ -74,9 +74,9 @@ Roadmap berikutnya, urut prioritas:
 **GabutOS v1.0.0 — rilis stabil pertama.** Semua item roadmap awal tuntas, termasuk tiga gap yang sengaja ditahan dari v0.9.0. Sisa keterbatasan didokumentasikan jujur di README per bagian fitur, bukan lagi dianggap "belum selesai".
 
 ### Roadmap Selanjutnya (post-1.0.0)
-Target besar berikutnya: **self-hosted C compiler + shell interaktif yang lebih dari sekadar command tetap**, biar orang beneran bisa nulis dan compile program *di dalam* GabutOS sendiri — bukan cuma jalanin ELF yang dikompilasi di luar. Ini lompatan besar (compiler C itu proyek sendiri yang berat), kemungkinan dipecah jadi:
-1. Shell yang lebih powerful — script sederhana, variabel, pipe antar command
-2. Text editor minimal (buat nulis kode di dalam GabutOS)
+Target besar berikutnya: **self-hosted C compiler + shell interaktif yang lebih dari sekadar command tetap**, biar orang beneran bisa nulis dan compile program *di dalam* GabutOS sendiri — bukan cuma jalanin ELF yang dikompilasi di luar. Ini lompatan besar (compiler C itu proyek sendiri yang berat), dipecah jadi:
+1. ~~Shell parser argc/argv~~ ✅ selesai (v1.1.0) — kernel.c dipecah, semua command handler pindah ke shell/shell.c, tokenizer proper (bukan strcmp/starts_with manual)
+2. Text editor minimal (line-based) — buat nulis kode di dalam GabutOS
 3. Compiler C subset kecil dulu (bukan C penuh — mungkin cuma cukup buat compile ulang beberapa demo program sendiri)
 4. Assembler + linker minimal biar compiler bisa hasilkan ELF yang langsung jalan lewat loader yang udah ada
 

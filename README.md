@@ -6,17 +6,18 @@ A hobby x86 kernel built from scratch, booted via GRUB (Multiboot1). This docume
 
 ```
 GabutOS/
-├── kernel.c          orchestrator: boots subsystems, shell, command dispatch
+├── kernel.c          orchestrator: boots subsystems, hands off to the shell
 ├── boot/             Multiboot header, entry point, linker script
 ├── cpu/              GDT, IDT, exception/IRQ handling, TSS, ring0<->ring3, port I/O
 ├── mm/                physical + virtual memory management, heap allocator
 ├── drivers/          VGA, serial, keyboard, PIT timer, ATA disk
 ├── fs/                flat filesystem
 ├── loader/            ELF32 parser and loader
-└── task/              task control blocks and the scheduler
+├── task/              task control blocks and the scheduler
+└── shell/             command tokenizer and every shell command's implementation
 ```
 
-Files reference each other with plain `#include "header.h"` regardless of which folder they're actually in — the Makefile's `-Icpu -Imm -Idrivers -Ifs -Iloader -Itask` flags handle path resolution, so no include ever needs a relative path like `../cpu/idt.h`.
+Files reference each other with plain `#include "header.h"` regardless of which folder they're actually in — the Makefile's `-Icpu -Imm -Idrivers -Ifs -Iloader -Itask -Ishell` flags handle path resolution, so no include ever needs a relative path like `../cpu/idt.h`.
 
 ## Boot Sequence
 
@@ -86,9 +87,30 @@ A free-list allocator (`kmalloc`/`kfree`) that replaced an earlier bump allocato
 
 `kfree()` marks a block free and merges it forward with the next block if that one is also free and directly adjacent in memory. **Known limitation:** it only merges forward, not backward — a proper backward merge would need a doubly-linked list, which hasn't been added yet. This means some fragmentation can accumulate in patterns a smarter allocator would avoid, though it doesn't affect correctness.
 
-## Shell (`kernel.c`)
+## Shell (`shell/shell.c`, v1.1.0 rewrite)
 
-A simple line-based REPL. Commands: `help`, `clear`, `mem` (heap stats), `uptime` (PIT ticks), `pages` (physical memory stats), `alloctest` (allocates three blocks, frees the middle one, allocates a new block, and reports whether it landed in the freed block's old address — a live demonstration that `kfree()` reuse is actually working, not just "not crashing").
+Through v1.0.0, the shell lived entirely inside `kernel.c` as a long chain of `if (strcmp(cmd, "x") == 0) { ... } else if (...)` blocks, each command matched against the *entire* raw input line — meaning any command needing an argument (`cat`, `rm`, `run`) had to manually skip a fixed prefix length (`cmd + 4` for `"cat "`, for instance) rather than parse anything resembling real arguments. By v1.0.0 this had grown to roughly 250 lines inside a single 386-line file, all crammed into one function.
+
+The shell was extracted into its own `shell/` module with a real tokenizer. `shell_tokenize()` walks a raw input line in place — no new buffer, no `kmalloc()` — splitting on runs of spaces and writing `'\0'` terminators directly into the original line buffer, with `argv[]` entries pointing at the start of each resulting word. This is the same in-place splitting technique the standard C library's own `strtok` uses, chosen here specifically to avoid a heap allocation on every single command a user types. The result is an ordinary `argc`/`argv` pair, structurally identical to what `main()` receives in a hosted C program — commands look up `argv[0]` in a small dispatch table instead of chaining string comparisons, and anything needing an argument reads `argv[1]` directly instead of manually walking past a hardcoded prefix length.
+
+Every command from v1.0.0 was moved over unchanged in *behavior* — `cat`, `rm`, and `run` now check `argc < 2` and print a usage message instead of silently misbehaving on a bare command with no filename, which is a small but real improvement the old prefix-skipping approach didn't have (calling bare `cat` before this rewrite would have read one byte past the empty string as if it were a filename).
+
+### Verified Behavior
+
+Every command from the v1.0.0 test suite (`fsformat`, `loadtest`, `ls`, `rm`, `multitask`, `run` against both a well-behaved and a deliberately crashing and a deliberately oversized program, `crashtest`, `isotest`, `ps`) was re-run in a single session against the rewritten shell and produced identical output to before — confirming the parser rewrite changed nothing about existing command behavior. A further round specifically exercised the new tokenizer's edge cases:
+
+```
+GabutOS> cat
+Pakai: cat <nama>
+GabutOS> rm
+Pakai: rm <nama>
+GabutOS> nyoba command asal
+Command not found: nyoba
+GabutOS> cat  hello.txt
+File gak ketemu: hello.txt
+```
+
+A command with no argument now gives a clear usage message instead of crashing or reading garbage; an unrecognized multi-word input correctly reports only `argv[0]` (`nyoba`) as the unknown command rather than treating the whole line as one unmatched string; and a command with *double* spaces between the command name and its argument (`cat  hello.txt`) still parses `hello.txt` as a single clean argument, confirming the tokenizer correctly treats runs of whitespace as one separator rather than only handling exactly one space.
 
 ## Verified Behavior
 
@@ -468,12 +490,22 @@ The free-page count dropped by 16 between the two `pages` checks — consistent 
 13. ~~Automatic isolation for ordinary `run`-launched tasks~~ — done (v0.9.0)
 14. ~~Filesystem delete + real space reclamation~~ — done (v1.0.0)
 15. ~~Memory quotas for isolated tasks~~ — done (v1.0.0)
+16. ~~Shell rewritten with real `argc`/`argv` argument parsing~~ — done (v1.1.0)
 
 ## v1.0.0 — Where This Stands
 
 Every roadmap item is closed, including the three (filesystem delete/reclaim, and memory quotas) specifically held back from v0.9.0 as the reason `1.0.0` wasn't tagged yet. This is GabutOS's first release meant to be treated as a coherent, complete system rather than an in-progress snapshot: it boots standalone via GRUB, manages physical and virtual memory, reads and writes a real (if intentionally simple) filesystem, loads and runs independently compiled ELF binaries, and runs several of them concurrently with genuine per-process address space isolation, memory quotas, and the ability to kill a misbehaving one without taking the rest of the system down.
 
 `1.0.0` here does not mean "free of every rough edge." Every feature section above still lists honest, specific "Known Limitations" — a flat filesystem with a bounded free-list, no dynamic linking, no way to stop a ring-0 task that disables interrupts forever, and others. What changed at this version isn't that those went away; it's that none of them are structural gaps in something the kernel claims to do — they're documented boundaries of a system that otherwise works end to end, which is the bar this project set for calling a release stable.
+
+## Post-1.0.0: Toward a Self-Hosted Compiler
+
+With the kernel itself considered stable, the next large goal is letting someone write and compile a program *inside* GabutOS — not just run an ELF that was compiled elsewhere and copied onto the disk, which is all that's possible today. A full C compiler is out of scope for a project this size (production compilers are millions of lines of code built by large teams over years); the realistic target is a small, C-*like* toy language compiler, a common and well-scoped exercise in compiler construction. The planned path there:
+
+1. ~~A real shell with `argc`/`argv` argument parsing~~ — done (v1.1.0), a prerequisite for everything below since a compiler and its supporting tools need actual command-line arguments (a filename to compile, flags, etc.), not fixed-prefix string matching.
+2. A minimal line-based text editor — so code can actually be written from within GabutOS, rather than always arriving pre-compiled from the host.
+3. A small toy-language compiler — starting from the smallest possible subset (arithmetic expressions, then variables, then control flow) rather than attempting C compatibility from day one.
+4. A minimal assembler/linker so the compiler's output can become a real ELF binary the existing loader can run directly.
 
 ## Building
 
