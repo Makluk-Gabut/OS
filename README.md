@@ -516,3 +516,13 @@ make run   # requires qemu-system-i386
 ```
 
 Requires `nasm`, an `i686-elf-gcc` cross-compiler, and `qemu-system-i386`. A secondary `Makefile.tested-with-gcc-m32` is included as a fallback for environments without the cross-compiler (uses host `gcc -m32` plus a few extra linker flags to compensate for differences from a true `i686-elf` toolchain).
+
+
+Another project that helped shape GabutOS is Gabut Playground.
+
+It's my personal sandbox where I experiment with ideas, prototypes, and random stuff. Many experiments that eventually became part of this repository started there.
+
+If you're curious about what happens behind the scenes, feel free to check it out.
+
+Gabut Playground: https://github.com/Makluk-Gabut/Gabut-Playground
+and be a contributor
